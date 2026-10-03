@@ -4,6 +4,8 @@ set -eu
 REPO="${COMMONVPN_REPOSITORY:-ASTRACAT2022/common-vpn-for-router}"
 BASE_URL="${COMMONVPN_RELEASE_BASE_URL:-}"
 VERSION="${COMMONVPN_VERSION:-latest}"
+XRAY_VERSION="${COMMONVPN_XRAY_VERSION:-v26.9.30}"
+XRAY_VERSION_NUMBER="${XRAY_VERSION#v}"
 PORT="${COMMONVPN_PORT:-8787}"
 say() { printf '%s\n' "$*"; }
 fail() { say "Common VPN: $*" >&2; exit 1; }
@@ -95,11 +97,16 @@ tar -tzf "$APP_ARCHIVE" | grep -qx common-vpn || fail "неожиданное с
 tar -xzf "$APP_ARCHIVE" -C "$TMP" common-vpn
 [ -s "$TMP/common-vpn" ] || fail "в архиве нет common-vpn."
 
-if [ ! -x "$XRAY" ] || ! "$XRAY" version >/dev/null 2>&1; then
+INSTALLED_XRAY_VERSION=""
+if [ -x "$XRAY" ]; then
+  INSTALLED_XRAY_VERSION="$("$XRAY" version 2>/dev/null | awk 'NR == 1 { print $2 }')" || INSTALLED_XRAY_VERSION=""
+fi
+if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
+  say "Установка Xray Core $XRAY_VERSION (системные TUN-маршруты для Linux)."
   XRAY_READY=0
   for XRAY_ARCH in $XRAY_ARCHS; do
     XRAY_ZIP="$TMP/xray.zip"
-    if ! fetch "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-$XRAY_ARCH.zip" "$XRAY_ZIP"; then continue; fi
+    if ! fetch "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/Xray-$XRAY_ARCH.zip" "$XRAY_ZIP"; then continue; fi
     XRAY_FILE="$(unzip -l "$XRAY_ZIP" | awk '$4 ~ /(^|\/)xray$/ { print $4; exit }')"
     [ -n "$XRAY_FILE" ] || continue
     if ! unzip -p "$XRAY_ZIP" "$XRAY_FILE" > "$TMP/xray"; then continue; fi
@@ -108,6 +115,8 @@ if [ ! -x "$XRAY" ] || ! "$XRAY" version >/dev/null 2>&1; then
   done
   [ "$XRAY_READY" -eq 1 ] || fail "Xray Core не удалось запустить ни с одним вариантом для $(uname -m)."
   copy_executable "$TMP/xray" "$XRAY" || fail "не удалось установить Xray в $XRAY."
+else
+  say "Xray Core $XRAY_VERSION уже установлен."
 fi
 
 mkdir -p "$CONFIG" "$DATA"
