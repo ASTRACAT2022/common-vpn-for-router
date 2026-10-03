@@ -11,11 +11,12 @@ say() { printf '%s\n' "$*"; }
 fail() { say "Common VPN: $*" >&2; exit 1; }
 copy_executable() {
   target_dir="$(dirname "$2")"
-  target_tmp="$2.tmp.$$"
+  COPY_TMP="$2.tmp.$$"
   mkdir -p "$target_dir" || return 1
-  cp "$1" "$target_tmp" || { rm -f "$target_tmp"; return 1; }
-  chmod 0755 "$target_tmp" || { rm -f "$target_tmp"; return 1; }
-  mv -f "$target_tmp" "$2" || { rm -f "$target_tmp"; return 1; }
+  cp "$1" "$COPY_TMP" || { rm -f "$COPY_TMP"; COPY_TMP=""; return 1; }
+  chmod 0755 "$COPY_TMP" || { rm -f "$COPY_TMP"; COPY_TMP=""; return 1; }
+  mv -f "$COPY_TMP" "$2" || { rm -f "$COPY_TMP"; COPY_TMP=""; return 1; }
+  COPY_TMP=""
 }
 
 [ "$(id -u)" -eq 0 ] || fail "запусти установщик от root."
@@ -23,7 +24,17 @@ case "$REPO" in */*/*|"") fail "укажи репозиторий в форма�
 PATH="/opt/bin:/opt/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/common-vpn.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+XRAY_STAGE=""
+COPY_TMP=""
+cleanup() {
+  [ -z "$XRAY_STAGE" ] || rm -f "$XRAY_STAGE"
+  [ -z "$COPY_TMP" ] || rm -f "$COPY_TMP"
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ -f /etc/openwrt_release ]; then
   PLATFORM=openwrt; APP=/usr/bin/common-vpn; XRAY=/usr/bin/xray
@@ -61,17 +72,28 @@ check_url() {
   if command -v wget >/dev/null 2>&1; then wget -q -T 2 -O /dev/null "$1"; return $?; fi
   return 1
 }
+available_bytes() {
+  df -Pk "$1" 2>/dev/null | awk 'NR > 1 { available = $4 } END { if (available ~ /^[0-9]+$/) printf "%.0f", available * 1024 }'
+}
+has_space() {
+  space_available="$(available_bytes "$(dirname "$1")")"
+  case "$space_available" in ''|*[!0-9]*) return 1;; esac
+  [ "$space_available" -ge "$2" ] 2>/dev/null
+}
+xray_version() {
+  "$1" version 2>/dev/null | awk 'NR == 1 { print $2; exit }'
+}
+stop_service_for_xray_update() {
+  case "$PLATFORM" in
+    openwrt) [ ! -x "$SERVICE" ] || "$SERVICE" stop >/dev/null 2>&1 || true ;;
+    entware) [ ! -x "$SERVICE" ] || "$SERVICE" stop >/dev/null 2>&1 || true ;;
+    linux) command -v systemctl >/dev/null 2>&1 && systemctl stop common-vpn.service >/dev/null 2>&1 || true ;;
+  esac
+}
 
 if [ -z "$BASE_URL" ]; then
   if [ "$VERSION" = latest ]; then BASE_URL="https://github.com/$REPO/releases/latest/download"
   else BASE_URL="https://github.com/$REPO/releases/download/$VERSION"; fi
-fi
-
-if ! command -v unzip >/dev/null 2>&1; then
-  if command -v opkg >/dev/null 2>&1; then opkg update && opkg install unzip
-  elif command -v apk >/dev/null 2>&1; then apk update && apk add unzip
-  elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y unzip
-  else fail "не нашёл unzip или поддерживаемый пакетный менеджер."; fi
 fi
 
 [ -c /dev/net/tun ] || {
@@ -98,26 +120,97 @@ APP_ARCHIVE="$TMP/common-vpn.tar.gz"
 fetch "$BASE_URL/common-vpn-linux-$APP_ARCH.tar.gz" "$APP_ARCHIVE" || fail "не удалось скачать common-vpn-linux-$APP_ARCH из релиза $REPO; проверь доступ к GitHub и наличие файла в релизе."
 tar -tzf "$APP_ARCHIVE" | grep -qx common-vpn || fail "неожиданное содержимое архива common-vpn."
 tar -xzf "$APP_ARCHIVE" -C "$TMP" common-vpn
+rm -f "$APP_ARCHIVE"
 [ -s "$TMP/common-vpn" ] || fail "в архиве нет common-vpn."
 
-INSTALLED_XRAY_VERSION=""
-if [ -x "$XRAY" ]; then
-  INSTALLED_XRAY_VERSION="$("$XRAY" version 2>/dev/null | awk 'NR == 1 { print $2 }')" || INSTALLED_XRAY_VERSION=""
+ALT_XRAY=""
+case "$PLATFORM" in
+  openwrt) ALT_XRAY=/opt/bin/xray ;;
+  entware) ALT_XRAY=/usr/bin/xray ;;
+  linux) [ ! -d /opt ] || ALT_XRAY=/opt/bin/xray ;;
+esac
+INSTALLED_XRAY_VERSION="$(xray_version "$XRAY" || true)"
+if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ] && [ -n "$ALT_XRAY" ] && [ -x "$ALT_XRAY" ]; then
+  ALT_XRAY_VERSION="$(xray_version "$ALT_XRAY" || true)"
+  if [ "$ALT_XRAY_VERSION" = "$XRAY_VERSION_NUMBER" ]; then
+    XRAY="$ALT_XRAY"
+    INSTALLED_XRAY_VERSION="$ALT_XRAY_VERSION"
+  fi
 fi
 if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
+  mkdir -p "$(dirname "$XRAY")" || fail "не удалось создать каталог для Xray: $(dirname "$XRAY")."
+  if ! command -v unzip >/dev/null 2>&1; then
+    if command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx unzip; then
+      unzip() { busybox unzip "$@"; }
+    elif command -v opkg >/dev/null 2>&1; then opkg update && opkg install unzip
+    elif command -v apk >/dev/null 2>&1; then apk update && apk add unzip
+    elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y unzip
+    else fail "не нашёл unzip/BusyBox unzip или поддерживаемый пакетный менеджер."; fi
+  fi
   say "Установка Xray Core $XRAY_VERSION (системные TUN-маршруты для Linux)."
   XRAY_READY=0
   for XRAY_ARCH in $XRAY_ARCHS; do
     XRAY_ZIP="$TMP/xray.zip"
-    if ! fetch "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/Xray-$XRAY_ARCH.zip" "$XRAY_ZIP"; then continue; fi
+    rm -f "$XRAY_ZIP"
+    if ! fetch "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/Xray-$XRAY_ARCH.zip" "$XRAY_ZIP"; then rm -f "$XRAY_ZIP"; continue; fi
     XRAY_FILE="$(unzip -l "$XRAY_ZIP" | awk '$4 ~ /(^|\/)xray$/ { print $4; exit }')"
-    [ -n "$XRAY_FILE" ] || continue
-    if ! unzip -p "$XRAY_ZIP" "$XRAY_FILE" > "$TMP/xray"; then continue; fi
-    chmod 0755 "$TMP/xray"
-    if "$TMP/xray" version >/dev/null 2>&1; then XRAY_READY=1; break; fi
+    XRAY_SIZE="$(unzip -l "$XRAY_ZIP" | awk '$4 ~ /(^|\/)xray$/ { print $1; exit }')"
+    case "$XRAY_SIZE" in ''|*[!0-9]*) rm -f "$XRAY_ZIP"; continue;; esac
+    [ -n "$XRAY_FILE" ] || { rm -f "$XRAY_ZIP"; continue; }
+    # Validate the selected member's CRC without creating another temporary
+    # binary before an in-place replacement may have to free flash storage.
+    if ! unzip -p "$XRAY_ZIP" "$XRAY_FILE" >/dev/null; then rm -f "$XRAY_ZIP"; continue; fi
+
+    # Leave a little room for filesystem metadata. Extract straight onto the
+    # destination filesystem so the ZIP and a second 35 MiB binary are never
+    # stored together in the router's RAM-backed /tmp.
+    XRAY_REQUIRED=$((XRAY_SIZE + 65536))
+    XRAY_REPLACE_IN_PLACE=0
+    if ! has_space "$XRAY" "$XRAY_REQUIRED"; then
+      if [ -n "$ALT_XRAY" ] && [ "$ALT_XRAY" != "$XRAY" ] && { [ -d "$(dirname "$ALT_XRAY")" ] || mkdir -p "$(dirname "$ALT_XRAY")" 2>/dev/null; } && has_space "$ALT_XRAY" "$XRAY_REQUIRED"; then
+        say "Во внутренней памяти мало места; Xray будет установлен в $ALT_XRAY."
+        XRAY="$ALT_XRAY"
+      elif [ -f "$XRAY" ]; then
+        XRAY_FREE="$(available_bytes "$(dirname "$XRAY")")"
+        XRAY_OLD_SIZE="$(wc -c < "$XRAY" 2>/dev/null | awk '{ print $1 }')"
+        case "$XRAY_FREE:$XRAY_OLD_SIZE" in *[!0-9:]*|:*) XRAY_FREE=0; XRAY_OLD_SIZE=0;; esac
+        if [ $((XRAY_FREE + XRAY_OLD_SIZE)) -ge "$XRAY_REQUIRED" ]; then
+          XRAY_REPLACE_IN_PLACE=1
+        else
+          rm -f "$XRAY_ZIP"
+          continue
+        fi
+      else
+        rm -f "$XRAY_ZIP"
+        continue
+      fi
+    fi
+
+    XRAY_STAGE="$(dirname "$XRAY")/.xray.new.$$"
+    if [ "$XRAY_REPLACE_IN_PLACE" -eq 1 ]; then
+      say "Обновляю Xray без второй копии на диске."
+      stop_service_for_xray_update
+      rm -f "$XRAY" || { rm -f "$XRAY_ZIP"; XRAY_STAGE=""; continue; }
+      if ! has_space "$XRAY_STAGE" "$XRAY_SIZE"; then rm -f "$XRAY_ZIP"; XRAY_STAGE=""; continue; fi
+    fi
+    if ! unzip -p "$XRAY_ZIP" "$XRAY_FILE" > "$XRAY_STAGE"; then
+      rm -f "$XRAY_ZIP" "$XRAY_STAGE"
+      XRAY_STAGE=""
+      continue
+    fi
+    rm -f "$XRAY_ZIP"
+    chmod 0755 "$XRAY_STAGE" || { rm -f "$XRAY_STAGE"; XRAY_STAGE=""; continue; }
+    if [ "$(xray_version "$XRAY_STAGE" || true)" != "$XRAY_VERSION_NUMBER" ]; then
+      rm -f "$XRAY_STAGE"
+      XRAY_STAGE=""
+      continue
+    fi
+    if ! mv -f "$XRAY_STAGE" "$XRAY"; then rm -f "$XRAY_STAGE"; XRAY_STAGE=""; continue; fi
+    XRAY_STAGE=""
+    XRAY_READY=1
+    break
   done
-  [ "$XRAY_READY" -eq 1 ] || fail "Xray Core не удалось запустить ни с одним вариантом для $(uname -m)."
-  copy_executable "$TMP/xray" "$XRAY" || fail "не удалось установить Xray в $XRAY."
+  [ "$XRAY_READY" -eq 1 ] || fail "не удалось установить Xray: проверь свободное место в $(dirname "$XRAY") или подключи накопитель с /opt; временные файлы установщика удалены."
 else
   say "Xray Core $XRAY_VERSION уже установлен."
 fi
@@ -125,6 +218,7 @@ fi
 mkdir -p "$CONFIG" "$DATA"
 chmod 0700 "$CONFIG" "$DATA"
 copy_executable "$TMP/common-vpn" "$APP" || fail "не удалось установить Common VPN в $APP."
+rm -f "$TMP/common-vpn"
 
 if [ "$PLATFORM" = openwrt ]; then
   cat > "$SERVICE" <<EOF
