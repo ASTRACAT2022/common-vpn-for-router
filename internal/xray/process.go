@@ -44,7 +44,7 @@ func (p *ProcessManager) ValidateConfig(ctx context.Context, path string) error 
 	checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(checkCtx, binary, "run", "-test", "-config", path)
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	cmd.Stdout, cmd.Stderr = io.Discard, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return errors.New("Xray rejected the generated configuration")
 	}
@@ -62,7 +62,7 @@ func (p *ProcessManager) Start() error {
 		return errors.New("Xray executable was not found")
 	}
 	cmd := exec.Command(binary, "run", "-config", p.config)
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start Xray: %w", err)
 	}
@@ -81,7 +81,7 @@ func (p *ProcessManager) wait(cmd *exec.Cmd, done chan struct{}) {
 	err := cmd.Wait()
 	message := "exited successfully"
 	if err != nil {
-		message = "process exited with an error"
+		message = fmt.Sprintf("process exited with an error: %v", err)
 	}
 	close(done)
 	p.mu.Lock()
@@ -131,7 +131,7 @@ func (p *ProcessManager) Status() ProcessStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.runningLocked() {
-		return ProcessStatus{LastExit: p.lastExit}
+		return ProcessStatus{StartedAt: p.startedAt, LastExit: p.lastExit}
 	}
 	return ProcessStatus{Running: true, PID: p.cmd.Process.Pid, StartedAt: p.startedAt, LastExit: p.lastExit}
 }
