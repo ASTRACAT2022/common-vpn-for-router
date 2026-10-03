@@ -7,6 +7,11 @@ VERSION="${COMMONVPN_VERSION:-latest}"
 PORT="${COMMONVPN_PORT:-8787}"
 say() { printf '%s\n' "$*"; }
 fail() { say "Common VPN: $*" >&2; exit 1; }
+copy_executable() {
+  mkdir -p "$(dirname "$2")" || return 1
+  cp "$1" "$2" || return 1
+  chmod 0755 "$2"
+}
 
 [ "$(id -u)" -eq 0 ] || fail "запусти установщик от root."
 case "$REPO" in */*/*|"") fail "укажи репозиторий в формате owner/repository.";; esac
@@ -102,13 +107,12 @@ if [ ! -x "$XRAY" ] || ! "$XRAY" version >/dev/null 2>&1; then
     if "$TMP/xray" version >/dev/null 2>&1; then XRAY_READY=1; break; fi
   done
   [ "$XRAY_READY" -eq 1 ] || fail "Xray Core не удалось запустить ни с одним вариантом для $(uname -m)."
-  mkdir -p "$(dirname "$XRAY")"
-  install -m 0755 "$TMP/xray" "$XRAY"
+  copy_executable "$TMP/xray" "$XRAY" || fail "не удалось установить Xray в $XRAY."
 fi
 
 mkdir -p "$CONFIG" "$DATA"
 chmod 0700 "$CONFIG" "$DATA"
-install -m 0755 "$TMP/common-vpn" "$APP"
+copy_executable "$TMP/common-vpn" "$APP" || fail "не удалось установить Common VPN в $APP."
 
 if [ "$PLATFORM" = openwrt ]; then
   cat > "$SERVICE" <<EOF
