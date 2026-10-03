@@ -36,15 +36,21 @@ case "$(uname -m)" in
 esac
 if [ -z "${XRAY_ARCHS:-}" ]; then XRAY_ARCHS="$XRAY_ARCH"; fi
 
-if command -v curl >/dev/null 2>&1; then
-  fetch() { curl -fL --retry 2 --connect-timeout 15 --max-time 180 -o "$2" "$1"; }
-  check_url() { curl -fsS --max-time 2 "$1" >/dev/null; }
-elif command -v wget >/dev/null 2>&1; then
-  fetch() { wget -O "$2" "$1"; }
-  check_url() { wget -q -T 2 -O /dev/null "$1"; }
-else
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   fail "для загрузки нужны curl или wget."
 fi
+fetch() {
+  if command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; then
+    if curl -fL --retry 2 --connect-timeout 15 --max-time 180 -o "$2" "$1"; then return 0; fi
+  fi
+  if command -v wget >/dev/null 2>&1; then wget -O "$2" "$1"; return $?; fi
+  return 1
+}
+check_url() {
+  if command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1 && curl -fsS --max-time 2 "$1" >/dev/null; then return 0; fi
+  if command -v wget >/dev/null 2>&1; then wget -q -T 2 -O /dev/null "$1"; return $?; fi
+  return 1
+}
 
 if [ -z "$BASE_URL" ]; then
   if [ "$VERSION" = latest ]; then BASE_URL="https://github.com/$REPO/releases/latest/download"
@@ -79,7 +85,7 @@ LISTEN="$LAN_IP:$PORT"
 say "Обнаружено: $PLATFORM / $(uname -m), адрес панели: http://$LISTEN/"
 
 APP_ARCHIVE="$TMP/common-vpn.tar.gz"
-fetch "$BASE_URL/common-vpn-linux-$APP_ARCH.tar.gz" "$APP_ARCHIVE" || fail "нет сборки common-vpn-linux-$APP_ARCH в релизе $REPO."
+fetch "$BASE_URL/common-vpn-linux-$APP_ARCH.tar.gz" "$APP_ARCHIVE" || fail "не удалось скачать common-vpn-linux-$APP_ARCH из релиза $REPO; проверь доступ к GitHub и наличие файла в релизе."
 tar -tzf "$APP_ARCHIVE" | grep -qx common-vpn || fail "неожиданное содержимое архива common-vpn."
 tar -xzf "$APP_ARCHIVE" -C "$TMP" common-vpn
 [ -s "$TMP/common-vpn" ] || fail "в архиве нет common-vpn."

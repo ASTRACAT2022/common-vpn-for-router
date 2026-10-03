@@ -56,7 +56,7 @@ go run ./cmd/common-vpn -config-dir ./local-config -data-dir ./local-data -xray 
 
 Установщик уже настроен на репозиторий `ASTRACAT2022/common-vpn-for-router`. Чтобы выпустить новую версию, отправь тег вида `v1.0.0`: GitHub Actions соберёт архивы для amd64, arm64, armv7, mips и mipsle и создаст GitHub Release с бинарными файлами. Установщик скачивает актуальные архивы из последнего релиза. Workflow также можно запустить вручную в GitHub Actions — сборка появится среди артефактов запуска на 30 дней.
 
-Запускай её в SSH-сеансе на самом роутере от root:
+Запускай её в SSH-сеансе на самом роутере от root. На OpenWrt удобнее использовать `wget`; установщик проверяет `curl` перед каждой загрузкой и переключается на `wget`, если `curl` несовместим с библиотеками системы:
 
     curl -fsSL https://raw.githubusercontent.com/ASTRACAT2022/common-vpn-for-router/main/install-auto | sh
 
