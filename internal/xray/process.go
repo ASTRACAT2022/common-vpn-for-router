@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,11 +44,58 @@ func (p *ProcessManager) ValidateConfig(ctx context.Context, path string) error 
 	checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(checkCtx, binary, "run", "-test", "-config", path)
-	cmd.Stdout, cmd.Stderr = io.Discard, os.Stderr
+	output := &limitedOutput{limit: 2048}
+	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Run(); err != nil {
-		return errors.New("Xray rejected the generated configuration")
+		captured, truncated := output.snapshot()
+		detail := strings.Join(strings.Fields(strings.ToValidUTF8(string(captured), "�")), " ")
+		if truncated {
+			detail += " … (вывод сокращён)"
+		}
+		if checkCtx.Err() != nil {
+			if detail != "" {
+				return fmt.Errorf("проверка конфигурации Xray прервана: %s", detail)
+			}
+			return fmt.Errorf("проверка конфигурации Xray прервана: %w", checkCtx.Err())
+		}
+		if detail != "" {
+			return fmt.Errorf("Xray отклонил созданную конфигурацию: %s", detail)
+		}
+		return fmt.Errorf("Xray отклонил созданную конфигурацию (%v)", err)
 	}
 	return nil
+}
+
+// limitedOutput captures enough validator output to diagnose common config
+// errors without allowing a broken binary to fill router memory or the UI.
+type limitedOutput struct {
+	mu        sync.Mutex
+	data      []byte
+	limit     int
+	truncated bool
+}
+
+func (o *limitedOutput) Write(data []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	remaining := o.limit - len(o.data)
+	if remaining > 0 {
+		if len(data) > remaining {
+			o.data = append(o.data, data[:remaining]...)
+			o.truncated = true
+		} else {
+			o.data = append(o.data, data...)
+		}
+	} else if len(data) > 0 {
+		o.truncated = true
+	}
+	return len(data), nil
+}
+
+func (o *limitedOutput) snapshot() ([]byte, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]byte(nil), o.data...), o.truncated
 }
 
 func (p *ProcessManager) Start() error {
