@@ -10,9 +10,12 @@ PORT="${COMMONVPN_PORT:-8787}"
 say() { printf '%s\n' "$*"; }
 fail() { say "Common VPN: $*" >&2; exit 1; }
 copy_executable() {
-  mkdir -p "$(dirname "$2")" || return 1
-  cp "$1" "$2" || return 1
-  chmod 0755 "$2"
+  target_dir="$(dirname "$2")"
+  target_tmp="$2.tmp.$$"
+  mkdir -p "$target_dir" || return 1
+  cp "$1" "$target_tmp" || { rm -f "$target_tmp"; return 1; }
+  chmod 0755 "$target_tmp" || { rm -f "$target_tmp"; return 1; }
+  mv -f "$target_tmp" "$2" || { rm -f "$target_tmp"; return 1; }
 }
 
 [ "$(id -u)" -eq 0 ] || fail "запусти установщик от root."
