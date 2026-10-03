@@ -24,17 +24,34 @@ func (b *flexibleBool) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type flexibleStringList []string
+
+func (list *flexibleStringList) UnmarshalJSON(data []byte) error {
+	var values []string
+	if err := json.Unmarshal(data, &values); err == nil {
+		*list = flexibleStringList(values)
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("expected a string or list of strings")
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == '\n' || r == '\r' || r == ',' })
+	*list = flexibleStringList(parts)
+	return nil
+}
+
 type happProfile struct {
-	Name           string       `json:"Name"`
-	GlobalProxy    flexibleBool `json:"GlobalProxy"`
-	RouteOrder     string       `json:"RouteOrder"`
-	DomainStrategy string       `json:"DomainStrategy"`
-	DirectSites    []string     `json:"DirectSites"`
-	DirectIP       []string     `json:"DirectIp"`
-	ProxySites     []string     `json:"ProxySites"`
-	ProxyIP        []string     `json:"ProxyIp"`
-	BlockSites     []string     `json:"BlockSites"`
-	BlockIP        []string     `json:"BlockIp"`
+	Name           string             `json:"Name"`
+	GlobalProxy    flexibleBool       `json:"GlobalProxy"`
+	RouteOrder     string             `json:"RouteOrder"`
+	DomainStrategy string             `json:"DomainStrategy"`
+	DirectSites    flexibleStringList `json:"DirectSites"`
+	DirectIP       flexibleStringList `json:"DirectIp"`
+	ProxySites     flexibleStringList `json:"ProxySites"`
+	ProxyIP        flexibleStringList `json:"ProxyIp"`
+	BlockSites     flexibleStringList `json:"BlockSites"`
+	BlockIP        flexibleStringList `json:"BlockIp"`
 }
 
 func Import(raw string) (Profile, error) {
@@ -69,9 +86,9 @@ func Import(raw string) (Profile, error) {
 	profile := Profile{
 		ID: stableID(string(data)), Name: strings.TrimSpace(input.Name), GlobalProxy: bool(input.GlobalProxy),
 		RouteOrder: order, DomainStrategy: strategy,
-		DirectDomains: cleanList(input.DirectSites), DirectIPs: cleanList(input.DirectIP),
-		ProxyDomains: cleanList(input.ProxySites), ProxyIPs: cleanList(input.ProxyIP),
-		BlockDomains: cleanList(input.BlockSites), BlockIPs: cleanList(input.BlockIP),
+		DirectDomains: cleanList([]string(input.DirectSites)), DirectIPs: cleanList([]string(input.DirectIP)),
+		ProxyDomains: cleanList([]string(input.ProxySites)), ProxyIPs: cleanList([]string(input.ProxyIP)),
+		BlockDomains: cleanList([]string(input.BlockSites)), BlockIPs: cleanList([]string(input.BlockIP)),
 	}
 	if profile.Name == "" {
 		profile.Name = "Imported routing profile"

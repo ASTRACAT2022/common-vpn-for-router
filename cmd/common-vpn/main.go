@@ -51,6 +51,7 @@ func main() {
 	serveResult := make(chan error, 1)
 	go func() { serveResult <- httpServer.ListenAndServe() }()
 	go server.RunAutoMonitor(ctx)
+	go server.RunSubscriptionMonitor(ctx)
 	logger.Info("daemon started", "component", "api", "address", cfg.ListenAddress, "version", version)
 	select {
 	case <-ctx.Done():

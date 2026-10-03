@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"common-vpn-router/internal/node"
@@ -17,8 +19,11 @@ import (
 )
 
 const maxSubscriptionSize = 2 << 20
+const defaultUpdateIntervalHours = 24
+const maxUpdateIntervalHours = 168
 
 type Manager struct {
+	mu     sync.Mutex
 	store  *storage.Store
 	client *http.Client
 }
@@ -39,11 +44,13 @@ func NewManager(store *storage.Store) *Manager {
 }
 
 func (m *Manager) Add(ctx context.Context, rawURL, name string) (Subscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	parsedURL, err := validateSubscriptionURL(rawURL)
 	if err != nil {
 		return Subscription{}, err
 	}
-	body, etag, modified, err := m.download(ctx, parsedURL.String(), "", "")
+	body, etag, modified, interval, err := m.download(ctx, parsedURL.String(), "", "")
 	if err != nil {
 		return Subscription{}, err
 	}
@@ -59,7 +66,10 @@ func (m *Manager) Add(ctx context.Context, rawURL, name string) (Subscription, e
 		return Subscription{}, err
 	}
 	parsed.Nodes = scopeNodeIDs(id, parsed.Nodes)
-	sub := Subscription{ID: id, Name: name, URL: parsedURL.String(), Nodes: parsed.Nodes, UpdatedAt: time.Now().UTC(), ETag: etag, LastModified: modified}
+	if interval == 0 {
+		interval = defaultUpdateIntervalHours
+	}
+	sub := Subscription{ID: id, Name: name, URL: parsedURL.String(), Nodes: parsed.Nodes, UpdatedAt: time.Now().UTC(), UpdateIntervalHours: interval, ETag: etag, LastModified: modified}
 	err = m.store.Update(func(state *storage.State) error {
 		state.Subscriptions = append(state.Subscriptions, sub)
 		if state.ActiveSubscriptionID == "" {
@@ -71,6 +81,21 @@ func (m *Manager) Add(ctx context.Context, rawURL, name string) (Subscription, e
 }
 
 func (m *Manager) Update(ctx context.Context, id, rawURL, name string) (Subscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.update(ctx, id, rawURL, name, false)
+}
+
+// ForceRefresh downloads the full body even when the provider sent validators
+// on an earlier response. The stored subscription is replaced only after parsing
+// the new body succeeds.
+func (m *Manager) ForceRefresh(ctx context.Context, id string) (Subscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.update(ctx, id, "", "", true)
+}
+
+func (m *Manager) update(ctx context.Context, id, rawURL, name string, force bool) (Subscription, error) {
 	current, ok := m.find(id)
 	if !ok {
 		return Subscription{}, errors.New("subscription not found")
@@ -83,15 +108,34 @@ func (m *Manager) Update(ctx context.Context, id, rawURL, name string) (Subscrip
 		return Subscription{}, err
 	}
 	conditionalETag, conditionalModified := current.ETag, current.LastModified
-	if parsedURL.String() != current.URL {
+	if force || parsedURL.String() != current.URL {
 		conditionalETag, conditionalModified = "", ""
 	}
-	body, etag, modified, err := m.download(ctx, parsedURL.String(), conditionalETag, conditionalModified)
+	body, etag, modified, interval, err := m.download(ctx, parsedURL.String(), conditionalETag, conditionalModified)
 	if err != nil {
 		return Subscription{}, err
 	}
 	if body == nil { // HTTP 304: the stored, known-good version remains current.
-		return current, nil
+		current.UpdatedAt = time.Now().UTC()
+		if interval > 0 {
+			current.UpdateIntervalHours = interval
+		}
+		if etag != "" {
+			current.ETag = etag
+		}
+		if modified != "" {
+			current.LastModified = modified
+		}
+		err = m.store.Update(func(state *storage.State) error {
+			for i := range state.Subscriptions {
+				if state.Subscriptions[i].ID == id {
+					state.Subscriptions[i] = current
+					return nil
+				}
+			}
+			return errors.New("subscription not found")
+		})
+		return current, err
 	}
 	parsed, err := ParsePayload(body)
 	if err != nil {
@@ -104,6 +148,10 @@ func (m *Manager) Update(ctx context.Context, id, rawURL, name string) (Subscrip
 	updated := current
 	updated.Name, updated.URL, updated.Nodes = name, parsedURL.String(), parsed.Nodes
 	updated.UpdatedAt, updated.ETag, updated.LastModified = time.Now().UTC(), etag, modified
+	updated.UpdateIntervalHours = defaultUpdateIntervalHours
+	if interval > 0 {
+		updated.UpdateIntervalHours = interval
+	}
 	err = m.store.Update(func(state *storage.State) error {
 		for i := range state.Subscriptions {
 			if state.Subscriptions[i].ID == id {
@@ -121,6 +169,8 @@ func (m *Manager) Refresh(ctx context.Context, id string) (Subscription, error) 
 }
 
 func (m *Manager) Delete(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.store.Update(func(state *storage.State) error {
 		for i := range state.Subscriptions {
 			if state.Subscriptions[i].ID == id {
@@ -145,10 +195,10 @@ func (m *Manager) find(id string) (Subscription, bool) {
 	return Subscription{}, false
 }
 
-func (m *Manager) download(ctx context.Context, target, etag, modified string) ([]byte, string, string, error) {
+func (m *Manager) download(ctx context.Context, target, etag, modified string) ([]byte, string, string, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("create subscription request: %w", err)
+		return nil, "", "", 0, fmt.Errorf("create subscription request: %w", err)
 	}
 	req.Header.Set("User-Agent", "Common-VPN-Router/0.1")
 	req.Header.Set("Accept", "text/plain, application/json, */*")
@@ -160,23 +210,35 @@ func (m *Manager) download(ctx context.Context, target, etag, modified string) (
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, "", "", errors.New("subscription download failed")
+		return nil, "", "", 0, errors.New("subscription download failed")
 	}
 	defer resp.Body.Close()
+	interval := parseUpdateInterval(resp.Header.Get("Profile-Update-Interval"))
 	if resp.StatusCode == http.StatusNotModified {
-		return nil, etag, modified, nil
+		return nil, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), interval, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", "", fmt.Errorf("subscription server returned HTTP %d", resp.StatusCode)
+		return nil, "", "", 0, fmt.Errorf("subscription server returned HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionSize+1))
 	if err != nil {
-		return nil, "", "", errors.New("subscription response could not be read")
+		return nil, "", "", 0, errors.New("subscription response could not be read")
 	}
 	if len(body) > maxSubscriptionSize {
-		return nil, "", "", errors.New("subscription exceeds 2 MiB limit")
+		return nil, "", "", 0, errors.New("subscription exceeds 2 MiB limit")
 	}
-	return body, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), nil
+	return body, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), interval, nil
+}
+
+func parseUpdateInterval(value string) int {
+	hours, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || hours < 1 {
+		return 0
+	}
+	if hours > maxUpdateIntervalHours {
+		return maxUpdateIntervalHours
+	}
+	return hours
 }
 
 func validateSubscriptionURL(raw string) (*url.URL, error) {

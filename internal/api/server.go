@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -75,7 +76,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, sub := range state.Subscriptions {
 		if sub.ID == state.ActiveSubscriptionID {
-			response["subscription"] = map[string]any{"id": sub.ID, "name": sub.Name, "nodeCount": len(sub.Nodes), "updatedAt": sub.UpdatedAt}
+			response["subscription"] = map[string]any{"id": sub.ID, "name": sub.Name, "nodeCount": len(sub.Nodes), "updatedAt": sub.UpdatedAt, "updateIntervalHours": subscriptionIntervalHours(sub)}
 		}
 		for _, n := range sub.Nodes {
 			if n.ID == state.SelectedNodeID {
@@ -141,7 +142,9 @@ func (s *Server) updateSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
-	sub, err := s.subscriptions.Refresh(r.Context(), r.PathValue("id"))
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	sub, err := s.refreshSubscriptionData(r.Context(), r.PathValue("id"), true)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err.Error() == "subscription not found" {
@@ -151,6 +154,59 @@ func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, summarizeSubscription(sub))
+}
+
+func (s *Server) refreshSubscriptionData(ctx context.Context, id string, force bool) (subscription.Subscription, error) {
+	var updated subscription.Subscription
+	var err error
+	if force {
+		updated, err = s.subscriptions.ForceRefresh(ctx, id)
+	} else {
+		updated, err = s.subscriptions.Refresh(ctx, id)
+	}
+	if err != nil {
+		return subscription.Subscription{}, err
+	}
+	state := s.store.Snapshot()
+	if state.ActiveSubscriptionID != id || hasNodeID(updated.Nodes, state.SelectedNodeID) {
+		return updated, nil
+	}
+	if len(updated.Nodes) == 0 {
+		return updated, errors.New("subscription contains no servers")
+	}
+	replacement := updated.Nodes[0]
+	if state.AutoMode && state.VPNEnabled {
+		candidates := s.probeCandidates(ctx, state, "")
+		if len(candidates) > 0 {
+			replacement = candidates[0].node
+		}
+	}
+	if state.VPNEnabled {
+		if err := s.applyNode(ctx, state, replacement, state.AutoMode); err != nil {
+			return updated, fmt.Errorf("subscription updated, but the replacement server could not be applied: %w", err)
+		}
+		return updated, nil
+	}
+	if err := s.store.Update(func(current *storage.State) error {
+		current.ActiveSubscriptionID = id
+		current.SelectedNodeID = replacement.ID
+		return nil
+	}); err != nil {
+		return updated, errors.New("subscription updated, but the selected server could not be saved")
+	}
+	return updated, nil
+}
+
+func hasNodeID(nodes []node.Node, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, candidate := range nodes {
+		if candidate.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request) {
@@ -248,6 +304,9 @@ func (s *Server) importRouting(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	previous := s.store.Snapshot()
 	if err := s.store.Update(func(state *storage.State) error {
 		state.RoutingProfiles = []routing.Profile{profile}
 		state.ActiveRoutingID = profile.ID
@@ -256,11 +315,30 @@ func (s *Server) importRouting(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not save routing profile")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"profile": profile})
+	applied := false
+	if s.xray.Status().Running {
+		state := s.store.Snapshot()
+		selected, ok := selectedNode(state)
+		if !ok {
+			s.restoreRoutingState(previous)
+			writeError(w, http.StatusConflict, "routing profile was not applied because no server is selected")
+			return
+		}
+		if err := s.applyNode(r.Context(), state, selected, state.AutoMode); err != nil {
+			s.restoreRoutingState(previous)
+			writeError(w, http.StatusBadGateway, "routing profile was saved but could not be applied: "+err.Error())
+			return
+		}
+		applied = true
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"profile": profile, "applied": applied})
 }
 
 func (s *Server) deleteRouting(w http.ResponseWriter, r *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 	id := r.PathValue("id")
+	previous := s.store.Snapshot()
 	found := false
 	err := s.store.Update(func(state *storage.State) error {
 		profiles := make([]routing.Profile, 0, len(state.RoutingProfiles))
@@ -287,7 +365,29 @@ func (s *Server) deleteRouting(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "routing profile not found")
 		return
 	}
+	if s.xray.Status().Running {
+		state := s.store.Snapshot()
+		selected, ok := selectedNode(state)
+		if !ok {
+			s.restoreRoutingState(previous)
+			writeError(w, http.StatusConflict, "routing profile was not removed because no server is selected")
+			return
+		}
+		if err := s.applyNode(r.Context(), state, selected, state.AutoMode); err != nil {
+			s.restoreRoutingState(previous)
+			writeError(w, http.StatusBadGateway, "routing profile was removed but the VPN could not be updated: "+err.Error())
+			return
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) restoreRoutingState(previous storage.State) {
+	_ = s.store.Update(func(state *storage.State) error {
+		state.RoutingProfiles = previous.RoutingProfiles
+		state.ActiveRoutingID = previous.ActiveRoutingID
+		return nil
+	})
 }
 
 func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
@@ -508,6 +608,56 @@ func (s *Server) RunAutoMonitor(ctx context.Context) {
 	}
 }
 
+// RunSubscriptionMonitor refreshes subscriptions at their profile-update-interval
+// (hours). The XTLS header is persisted when the subscription is downloaded.
+func (s *Server) RunSubscriptionMonitor(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	retryAfter := make(map[string]time.Time)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		now := time.Now().UTC()
+		for _, candidate := range s.store.Snapshot().Subscriptions {
+			if next := retryAfter[candidate.ID]; now.Before(next) || !subscriptionDue(candidate, now) {
+				continue
+			}
+			s.operationMu.Lock()
+			current, ok := findSubscription(s.store.Snapshot(), candidate.ID)
+			if !ok || !subscriptionDue(current, now) {
+				s.operationMu.Unlock()
+				continue
+			}
+			refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			updated, err := s.refreshSubscriptionData(refreshCtx, current.ID, false)
+			cancel()
+			s.operationMu.Unlock()
+			if err != nil {
+				retryAfter[candidate.ID] = time.Now().UTC().Add(15 * time.Minute)
+				s.logger.Warn("automatic subscription refresh failed", "component", "subscription", "subscription", candidate.Name, "error", err.Error())
+				continue
+			}
+			delete(retryAfter, candidate.ID)
+			s.logger.Info("subscription refreshed", "component", "subscription", "subscription", updated.Name, "nodes", len(updated.Nodes), "interval_hours", subscriptionIntervalHours(updated))
+		}
+	}
+}
+
+func subscriptionIntervalHours(sub subscription.Subscription) int {
+	if sub.UpdateIntervalHours <= 0 {
+		return 24
+	}
+	return sub.UpdateIntervalHours
+}
+
+func subscriptionDue(sub subscription.Subscription, now time.Time) bool {
+	interval := time.Duration(subscriptionIntervalHours(sub)) * time.Hour
+	return sub.UpdatedAt.IsZero() || !now.Before(sub.UpdatedAt.Add(interval))
+}
+
 func countNodes(state storage.State) int {
 	count := 0
 	for _, sub := range state.Subscriptions {
@@ -521,11 +671,12 @@ func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) {
 }
 
 type subscriptionSummary struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	URL       string    `json:"url"`
-	NodeCount int       `json:"nodeCount"`
-	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	URL                 string    `json:"url"`
+	NodeCount           int       `json:"nodeCount"`
+	UpdatedAt           time.Time `json:"updatedAt,omitempty"`
+	UpdateIntervalHours int       `json:"updateIntervalHours"`
 }
 
 type nodeSummary struct {
@@ -551,7 +702,7 @@ func findRoutingProfile(state storage.State, id string) (routing.Profile, bool) 
 }
 
 func summarizeSubscription(sub subscription.Subscription) subscriptionSummary {
-	return subscriptionSummary{ID: sub.ID, Name: sub.Name, URL: maskURL(sub.URL), NodeCount: len(sub.Nodes), UpdatedAt: sub.UpdatedAt}
+	return subscriptionSummary{ID: sub.ID, Name: sub.Name, URL: maskURL(sub.URL), NodeCount: len(sub.Nodes), UpdatedAt: sub.UpdatedAt, UpdateIntervalHours: subscriptionIntervalHours(sub)}
 }
 
 func summarizeNode(n node.Node) nodeSummary {

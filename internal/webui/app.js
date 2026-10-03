@@ -64,8 +64,27 @@ async function loadSubscriptions() {
     const row = document.createElement("div"); row.className = "subscription-item";
     const details = document.createElement("div");
     const title = document.createElement("div"); title.className = "subscription-title"; title.textContent = sub.name;
-    const meta = document.createElement("div"); meta.className = "subscription-meta"; meta.textContent = `${sub.nodeCount} серверов`;
-    details.append(title, meta); row.append(details); container.append(row);
+    const meta = document.createElement("div"); meta.className = "subscription-meta";
+    const updatedAt = sub.updatedAt ? new Date(sub.updatedAt).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : "ещё не проверялась";
+    const interval = Number(sub.updateIntervalHours) || 24;
+    meta.textContent = `${sub.nodeCount} серверов · проверено ${updatedAt} · автообновление раз в ${interval} ч.`;
+    details.append(title, meta);
+    const update = document.createElement("button"); update.type = "button"; update.className = "button secondary subscription-update"; update.textContent = "Обновить";
+    update.title = "Скачать текущую версию подписки и заменить список серверов";
+    update.addEventListener("click", async () => {
+      update.disabled = true; update.textContent = "Обновляю…";
+      try {
+        const result = await api(`/api/subscriptions/${encodeURIComponent(sub.id)}/update`, { method: "POST" });
+        await refresh();
+        notice(`Подписка обновлена · ${result.nodeCount} серверов.`);
+      } catch (error) {
+        notice(error.message, true);
+        await refresh().catch(() => {});
+      } finally {
+        update.disabled = false; update.textContent = "Обновить";
+      }
+    });
+    row.append(details, update); container.append(row);
   }
 }
 
@@ -97,19 +116,53 @@ async function loadNodes() {
 }
 
 function renderRouting() {
-  const row = $("#routing-profile"); row.replaceChildren();
+  const row = $("#routing-profile");
+  const rulesExpanded = row.querySelector(".profile-rules-details")?.open || false;
+  row.replaceChildren();
   if (!ui.routing) {
     const label = document.createElement("span"); label.className = "muted"; label.textContent = "Профиль не добавлен"; row.append(label); return;
   }
   const details = document.createElement("div");
   const title = document.createElement("div"); title.className = "profile-name"; title.textContent = ui.routing.name;
-  const meta = document.createElement("div"); meta.className = "profile-meta"; meta.textContent = ui.routing.globalProxy ? "Нераспределённый трафик → VPN" : "Нераспределённый трафик → напрямую";
+  const groups = [
+    ["Через VPN", [...(ui.routing.proxyDomains || []), ...(ui.routing.proxyIPs || [])]],
+    ["Напрямую", [...(ui.routing.directDomains || []), ...(ui.routing.directIPs || [])]],
+    ["Блокировать", [...(ui.routing.blockDomains || []), ...(ui.routing.blockIPs || [])]],
+  ];
+  const ruleCount = groups.reduce((total, [, rules]) => total + rules.length, 0);
+  const fallback = ui.routing.globalProxy ? "остальной трафик → VPN" : "остальной трафик → напрямую";
+  const order = (ui.routing.routeOrder || ["block", "proxy", "direct"]).join(" → ");
+  const meta = document.createElement("div"); meta.className = "profile-meta";
+  meta.textContent = `${ruleCount} правил · ${fallback} · порядок ${order}`;
   details.append(title, meta);
+  const ruleDetails = document.createElement("details"); ruleDetails.className = "profile-rules-details";
+  ruleDetails.open = rulesExpanded;
+  const summary = document.createElement("summary"); summary.textContent = "Показать правила"; ruleDetails.append(summary);
+  const list = document.createElement("div"); list.className = "profile-rules";
+  let hasRules = false;
+  for (const [label, rules] of groups) {
+    if (!rules.length) continue;
+    hasRules = true;
+    const section = document.createElement("section"); section.className = "profile-rule-group";
+    const heading = document.createElement("strong"); heading.textContent = `${label} · ${rules.length}`;
+    const entries = document.createElement("div"); entries.className = "profile-rule-items";
+    for (const rule of rules.slice(0, 30)) {
+      const item = document.createElement("code"); item.textContent = rule; entries.append(item);
+    }
+    if (rules.length > 30) {
+      const more = document.createElement("span"); more.className = "muted"; more.textContent = `и ещё ${rules.length - 30}`; entries.append(more);
+    }
+    section.append(heading, entries); list.append(section);
+  }
+  if (!hasRules) {
+    const empty = document.createElement("span"); empty.className = "muted"; empty.textContent = "Отдельных списков нет — используется только правило для остального трафика."; list.append(empty);
+  }
+  ruleDetails.append(list); details.append(ruleDetails);
   const remove = document.createElement("button"); remove.className = "remove-profile"; remove.textContent = "Убрать профиль";
   remove.addEventListener("click", async () => {
     try {
       await api(`/api/routing/${encodeURIComponent(ui.routing.id)}`, { method: "DELETE" }); await refresh();
-      notice(ui.connected ? "Профиль убран. Нажмите «Применить изменения», чтобы обновить VPN." : "Профиль убран. Изменение применится при подключении VPN.");
+      notice(ui.connected ? "Профиль убран и изменения применены к VPN." : "Профиль убран. Изменение применится при подключении VPN.");
     }
     catch (error) { notice(error.message, true); }
   });
@@ -135,9 +188,9 @@ $("#routing-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.submitter; button.disabled = true;
   try {
-    await api("/api/routing/import", { method: "POST", body: JSON.stringify({ link: $("#routing-link").value.trim() }) });
+    const result = await api("/api/routing/import", { method: "POST", body: JSON.stringify({ link: $("#routing-link").value.trim() }) });
     $("#routing-link").value = ""; await loadStatus();
-    notice(ui.connected ? "Правила импортированы. Нажмите «Применить изменения», чтобы обновить VPN." : "Правила импортированы. Они применятся при подключении VPN.");
+    notice(result.applied ? "Правила импортированы и применены к VPN." : "Правила импортированы. Они применятся при подключении VPN.");
   } catch (error) { notice(error.message, true); }
   finally { button.disabled = false; }
 });
@@ -181,3 +234,4 @@ $("#auto-connect").addEventListener("click", async (event) => {
 
 refresh().catch((error) => notice(error.message, true));
 setInterval(() => loadStatus().catch(() => {}), 5000);
+setInterval(() => refresh().catch(() => {}), 30000);
