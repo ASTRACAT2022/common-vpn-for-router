@@ -83,14 +83,6 @@ has_space() {
 xray_version() {
   "$1" version 2>/dev/null | awk 'NR == 1 { print $2; exit }'
 }
-stop_service_for_xray_update() {
-  case "$PLATFORM" in
-    openwrt) [ ! -x "$SERVICE" ] || "$SERVICE" stop >/dev/null 2>&1 || true ;;
-    entware) [ ! -x "$SERVICE" ] || "$SERVICE" stop >/dev/null 2>&1 || true ;;
-    linux) command -v systemctl >/dev/null 2>&1 && systemctl stop common-vpn.service >/dev/null 2>&1 || true ;;
-  esac
-}
-
 if [ -z "$BASE_URL" ]; then
   if [ "$VERSION" = latest ]; then BASE_URL="https://github.com/$REPO/releases/latest/download"
   else BASE_URL="https://github.com/$REPO/releases/download/$VERSION"; fi
@@ -149,6 +141,9 @@ if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
   fi
   say "Установка Xray Core $XRAY_VERSION (системные TUN-маршруты для Linux)."
   XRAY_READY=0
+  XRAY_LAST_PATH="$XRAY"
+  XRAY_LAST_FREE="$(available_bytes "$(dirname "$XRAY")")"
+  XRAY_LAST_SIZE=0
   for XRAY_ARCH in $XRAY_ARCHS; do
     XRAY_ZIP="$TMP/xray.zip"
     rm -f "$XRAY_ZIP"
@@ -165,21 +160,18 @@ if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
     # destination filesystem so the ZIP and a second 35 MiB binary are never
     # stored together in the router's RAM-backed /tmp.
     XRAY_REQUIRED=$((XRAY_SIZE + 65536))
-    XRAY_REPLACE_IN_PLACE=0
+    XRAY_LAST_PATH="$XRAY"
+    XRAY_LAST_FREE="$(available_bytes "$(dirname "$XRAY")")"
+    XRAY_LAST_SIZE="$XRAY_SIZE"
     if ! has_space "$XRAY" "$XRAY_REQUIRED"; then
       if [ -n "$ALT_XRAY" ] && [ "$ALT_XRAY" != "$XRAY" ] && { [ -d "$(dirname "$ALT_XRAY")" ] || mkdir -p "$(dirname "$ALT_XRAY")" 2>/dev/null; } && has_space "$ALT_XRAY" "$XRAY_REQUIRED"; then
         say "Во внутренней памяти мало места; Xray будет установлен в $ALT_XRAY."
         XRAY="$ALT_XRAY"
+        XRAY_LAST_PATH="$XRAY"
+        XRAY_LAST_FREE="$(available_bytes "$(dirname "$XRAY")")"
       elif [ -f "$XRAY" ]; then
-        XRAY_FREE="$(available_bytes "$(dirname "$XRAY")")"
-        XRAY_OLD_SIZE="$(wc -c < "$XRAY" 2>/dev/null | awk '{ print $1 }')"
-        case "$XRAY_FREE:$XRAY_OLD_SIZE" in *[!0-9:]*|:*) XRAY_FREE=0; XRAY_OLD_SIZE=0;; esac
-        if [ $((XRAY_FREE + XRAY_OLD_SIZE)) -ge "$XRAY_REQUIRED" ]; then
-          XRAY_REPLACE_IN_PLACE=1
-        else
-          rm -f "$XRAY_ZIP"
-          continue
-        fi
+        rm -f "$XRAY_ZIP"
+        continue
       else
         rm -f "$XRAY_ZIP"
         continue
@@ -187,12 +179,6 @@ if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
     fi
 
     XRAY_STAGE="$(dirname "$XRAY")/.xray.new.$$"
-    if [ "$XRAY_REPLACE_IN_PLACE" -eq 1 ]; then
-      say "Обновляю Xray без второй копии на диске."
-      stop_service_for_xray_update
-      rm -f "$XRAY" || { rm -f "$XRAY_ZIP"; XRAY_STAGE=""; continue; }
-      if ! has_space "$XRAY_STAGE" "$XRAY_SIZE"; then rm -f "$XRAY_ZIP"; XRAY_STAGE=""; continue; fi
-    fi
     if ! unzip -p "$XRAY_ZIP" "$XRAY_FILE" > "$XRAY_STAGE"; then
       rm -f "$XRAY_ZIP" "$XRAY_STAGE"
       XRAY_STAGE=""
@@ -210,7 +196,7 @@ if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
     XRAY_READY=1
     break
   done
-  [ "$XRAY_READY" -eq 1 ] || fail "не удалось установить Xray: проверь свободное место в $(dirname "$XRAY") или подключи накопитель с /opt; временные файлы установщика удалены."
+  [ "$XRAY_READY" -eq 1 ] || fail "не удалось установить Xray: в $XRAY_LAST_PATH доступно ${XRAY_LAST_FREE:-неизвестно} байт, нужно около $XRAY_LAST_SIZE байт плюс место для файла. Существующий Xray не изменён; освободи место или подключи накопитель в /opt. Временные файлы установщика удалены."
 else
   say "Xray Core $XRAY_VERSION уже установлен."
 fi
