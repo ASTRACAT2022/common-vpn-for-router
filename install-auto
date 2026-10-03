@@ -1,0 +1,168 @@
+#!/bin/sh
+set -eu
+
+REPO="${COMMONVPN_REPOSITORY:-ASTRACAT2022/common-vpn-for-router}"
+BASE_URL="${COMMONVPN_RELEASE_BASE_URL:-}"
+VERSION="${COMMONVPN_VERSION:-latest}"
+PORT="${COMMONVPN_PORT:-8787}"
+say() { printf '%s\n' "$*"; }
+fail() { say "Common VPN: $*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || fail "запусти установщик от root."
+case "$REPO" in */*/*|"") fail "укажи репозиторий в формате owner/repository.";; esac
+PATH="/opt/bin:/opt/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/common-vpn.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+if [ -f /etc/openwrt_release ]; then
+  PLATFORM=openwrt; APP=/usr/bin/common-vpn; XRAY=/usr/bin/xray
+  CONFIG=/etc/common-vpn; DATA=/var/lib/common-vpn; SERVICE=/etc/init.d/common-vpn
+elif [ -d /opt/etc ] && [ -d /opt/bin ]; then
+  PLATFORM=entware; APP=/opt/bin/common-vpn; XRAY=/opt/bin/xray
+  CONFIG=/opt/etc/common-vpn; DATA=/opt/var/lib/common-vpn; SERVICE=/opt/etc/init.d/S95common-vpn
+else
+  PLATFORM=linux; APP=/usr/local/bin/common-vpn; XRAY=/usr/local/bin/xray
+  CONFIG=/etc/common-vpn; DATA=/var/lib/common-vpn; SERVICE=/etc/systemd/system/common-vpn.service
+fi
+
+case "$(uname -m)" in
+  x86_64|amd64) APP_ARCH=amd64; XRAY_ARCH=linux-64 ;;
+  aarch64|arm64) APP_ARCH=arm64; XRAY_ARCH=linux-arm64-v8a ;;
+  armv7l|armv7*) APP_ARCH=armv7; XRAY_ARCH=linux-arm32-v7a ;;
+  mips) APP_ARCH=mips; XRAY_ARCHS="linux-mips32 linux-mips32-softfloat" ;;
+  mipsel|mipsle) APP_ARCH=mipsle; XRAY_ARCHS="linux-mips32le linux-mips32le-softfloat" ;;
+  *) fail "неподдерживаемая архитектура $(uname -m); нужны amd64, arm64, armv7, mips или mipsle." ;;
+esac
+if [ -z "${XRAY_ARCHS:-}" ]; then XRAY_ARCHS="$XRAY_ARCH"; fi
+
+if command -v curl >/dev/null 2>&1; then
+  fetch() { curl -fL --retry 2 --connect-timeout 15 --max-time 180 -o "$2" "$1"; }
+  check_url() { curl -fsS --max-time 2 "$1" >/dev/null; }
+elif command -v wget >/dev/null 2>&1; then
+  fetch() { wget -O "$2" "$1"; }
+  check_url() { wget -q -T 2 -O /dev/null "$1"; }
+else
+  fail "для загрузки нужны curl или wget."
+fi
+
+if [ -z "$BASE_URL" ]; then
+  if [ "$VERSION" = latest ]; then BASE_URL="https://github.com/$REPO/releases/latest/download"
+  else BASE_URL="https://github.com/$REPO/releases/download/$VERSION"; fi
+fi
+
+if ! command -v unzip >/dev/null 2>&1; then
+  if command -v opkg >/dev/null 2>&1; then opkg update && opkg install unzip
+  elif command -v apk >/dev/null 2>&1; then apk update && apk add unzip
+  elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y unzip
+  else fail "не нашёл unzip или поддерживаемый пакетный менеджер."; fi
+fi
+
+[ -c /dev/net/tun ] || {
+  if [ "$PLATFORM" = openwrt ]; then
+    if command -v apk >/dev/null 2>&1; then apk update && apk add kmod-tun
+    elif command -v opkg >/dev/null 2>&1; then opkg update && opkg install kmod-tun; fi
+    if command -v modprobe >/dev/null 2>&1; then modprobe tun || true; fi
+  fi
+  [ -c /dev/net/tun ] || fail "TUN выключен: установи модуль ядра и создай /dev/net/tun."
+}
+
+LAN_IP=""
+if command -v ip >/dev/null 2>&1; then
+  LAN_IP="$(ip -o -4 addr show scope global 2>/dev/null | awk '
+    { split($4,a,"/"); ip=a[1]; if (ip ~ /^10\./ || ip ~ /^192\.168\./ || ip ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) { if ($2 ~ /^br[-0-9]/ || $2 ~ /^lan/) { print ip; found=1; exit } if (fallback == "") fallback=ip } }
+    END { if (!found && fallback != "") print fallback }
+  ')"
+fi
+if [ -z "$LAN_IP" ]; then LAN_IP=127.0.0.1; say "LAN IPv4 не найден; панель будет локальной."; fi
+LISTEN="$LAN_IP:$PORT"
+say "Обнаружено: $PLATFORM / $(uname -m), адрес панели: http://$LISTEN/"
+
+APP_ARCHIVE="$TMP/common-vpn.tar.gz"
+fetch "$BASE_URL/common-vpn-linux-$APP_ARCH.tar.gz" "$APP_ARCHIVE" || fail "нет сборки common-vpn-linux-$APP_ARCH в релизе $REPO."
+tar -tzf "$APP_ARCHIVE" | grep -qx common-vpn || fail "неожиданное содержимое архива common-vpn."
+tar -xzf "$APP_ARCHIVE" -C "$TMP" common-vpn
+[ -s "$TMP/common-vpn" ] || fail "в архиве нет common-vpn."
+
+if [ ! -x "$XRAY" ] || ! "$XRAY" version >/dev/null 2>&1; then
+  XRAY_READY=0
+  for XRAY_ARCH in $XRAY_ARCHS; do
+    XRAY_ZIP="$TMP/xray.zip"
+    if ! fetch "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-$XRAY_ARCH.zip" "$XRAY_ZIP"; then continue; fi
+    XRAY_FILE="$(unzip -l "$XRAY_ZIP" | awk '$4 ~ /(^|\/)xray$/ { print $4; exit }')"
+    [ -n "$XRAY_FILE" ] || continue
+    if ! unzip -p "$XRAY_ZIP" "$XRAY_FILE" > "$TMP/xray"; then continue; fi
+    chmod 0755 "$TMP/xray"
+    if "$TMP/xray" version >/dev/null 2>&1; then XRAY_READY=1; break; fi
+  done
+  [ "$XRAY_READY" -eq 1 ] || fail "Xray Core не удалось запустить ни с одним вариантом для $(uname -m)."
+  mkdir -p "$(dirname "$XRAY")"
+  install -m 0755 "$TMP/xray" "$XRAY"
+fi
+
+mkdir -p "$CONFIG" "$DATA"
+chmod 0700 "$CONFIG" "$DATA"
+install -m 0755 "$TMP/common-vpn" "$APP"
+
+if [ "$PLATFORM" = openwrt ]; then
+  cat > "$SERVICE" <<EOF
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=95
+STOP=10
+start_service() {
+  procd_open_instance
+  procd_set_param command $APP -listen $LISTEN -config-dir $CONFIG -data-dir $DATA -xray $XRAY -tun=true
+  procd_set_param respawn 3600 5 5
+  procd_set_param stdout 1
+  procd_set_param stderr 1
+  procd_close_instance
+}
+EOF
+  chmod 0755 "$SERVICE"
+  "$SERVICE" enable
+  "$SERVICE" restart || "$SERVICE" start
+elif [ "$PLATFORM" = entware ]; then
+  mkdir -p /opt/var/run /opt/var/log "$(dirname "$SERVICE")"
+  cat > "$SERVICE" <<EOF
+#!/bin/sh
+case "\$1" in
+  start) $APP -listen $LISTEN -config-dir $CONFIG -data-dir $DATA -xray $XRAY -tun=true >>/opt/var/log/common-vpn.log 2>&1 & echo \$! >/opt/var/run/common-vpn.pid ;;
+  stop) [ ! -s /opt/var/run/common-vpn.pid ] || kill "\$(cat /opt/var/run/common-vpn.pid)" 2>/dev/null || true; rm -f /opt/var/run/common-vpn.pid ;;
+  restart) "\$0" stop; "\$0" start ;;
+  *) echo "Usage: \$0 {start|stop|restart}"; exit 1 ;;
+esac
+EOF
+  chmod 0755 "$SERVICE"
+  "$SERVICE" restart
+else
+  cat > "$SERVICE" <<EOF
+[Unit]
+Description=Common Network VPN client
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=$APP -listen $LISTEN -config-dir $CONFIG -data-dir $DATA -xray $XRAY -tun=true
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+[Install]
+  WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable common-vpn.service
+  systemctl restart common-vpn.service || systemctl start common-vpn.service
+fi
+
+tries=0
+until check_url "http://$LISTEN/api/system/info"; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 15 ] || fail "служба не ответила на проверочный запрос; проверь журнал службы и TUN."
+  sleep 1
+done
+say ""
+say "Common Network VPN установлен; веб-панель и API отвечают."
+say "На устройстве в локальной сети открой: http://$LISTEN/"
+say "Добавь подписку и включи «Авто · лучший сервер»."
+say "Не открывай порт $PORT в интернет/WAN: панель без отдельного пароля."

@@ -1,0 +1,36 @@
+name: Linux router releases
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-router-binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build release archives
+        run: make release-linux VERSION="${GITHUB_REF_NAME}"
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: common-vpn-linux-${{ github.ref_name }}
+          path: dist/common-vpn-linux-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish installable router builds
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/common-vpn-linux-*.tar.gz

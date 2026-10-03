@@ -1,0 +1,665 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"common-vpn-router/internal/config"
+	"common-vpn-router/internal/health"
+	"common-vpn-router/internal/node"
+	"common-vpn-router/internal/routing"
+	"common-vpn-router/internal/storage"
+	"common-vpn-router/internal/subscription"
+	"common-vpn-router/internal/webui"
+	"common-vpn-router/internal/xray"
+)
+
+type Server struct {
+	config        config.Config
+	store         *storage.Store
+	subscriptions *subscription.Manager
+	xray          *xray.Controller
+	logger        *slog.Logger
+	operationMu   sync.Mutex
+}
+
+func NewServer(cfg config.Config, store *storage.Store, subs *subscription.Manager, controller *xray.Controller, logger *slog.Logger) *Server {
+	return &Server{config: cfg, store: store, subscriptions: subs, xray: controller, logger: logger}
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	uiFiles := http.FileServer(http.FS(webui.Files()))
+	mux.Handle("GET /{$}", uiFiles)
+	mux.Handle("GET /app.css", uiFiles)
+	mux.Handle("GET /app.js", uiFiles)
+	mux.Handle("GET /commonnetwork-mark.png", uiFiles)
+	mux.HandleFunc("GET /api/status", s.status)
+	mux.HandleFunc("GET /api/subscriptions", s.listSubscriptions)
+	mux.HandleFunc("POST /api/subscriptions", s.addSubscription)
+	mux.HandleFunc("GET /api/subscriptions/{id}", s.getSubscription)
+	mux.HandleFunc("PUT /api/subscriptions/{id}", s.updateSubscription)
+	mux.HandleFunc("DELETE /api/subscriptions/{id}", s.deleteSubscription)
+	mux.HandleFunc("POST /api/subscriptions/{id}/update", s.refreshSubscription)
+	mux.HandleFunc("GET /api/nodes", s.listNodes)
+	mux.HandleFunc("POST /api/nodes/{id}/select", s.selectNode)
+	mux.HandleFunc("GET /api/routing", s.getRouting)
+	mux.HandleFunc("POST /api/routing/import", s.importRouting)
+	mux.HandleFunc("DELETE /api/routing/{id}", s.deleteRouting)
+	mux.HandleFunc("POST /api/vpn/connect", s.connect)
+	mux.HandleFunc("POST /api/vpn/auto-connect", s.autoConnect)
+	mux.HandleFunc("POST /api/vpn/auto-disable", s.disableAuto)
+	mux.HandleFunc("POST /api/vpn/disconnect", s.disconnect)
+	mux.HandleFunc("POST /api/vpn/restart", s.restart)
+	mux.HandleFunc("GET /api/system/info", s.systemInfo)
+	return securityHeaders(requestGuard(requestLog(s.logger, mux)))
+}
+
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	state := s.store.Snapshot()
+	status := s.xray.Status()
+	response := map[string]any{"connected": status.Running, "xray": status, "version": s.config.Version,
+		"selectedNode": nil, "subscription": nil, "tunnel": s.config.Tunnel, "routing": nil, "autoMode": state.AutoMode}
+	if profile, ok := findRoutingProfile(state, state.ActiveRoutingID); ok {
+		response["routing"] = map[string]any{"id": profile.ID, "name": profile.Name, "globalProxy": profile.GlobalProxy}
+	}
+	for _, sub := range state.Subscriptions {
+		if sub.ID == state.ActiveSubscriptionID {
+			response["subscription"] = map[string]any{"id": sub.ID, "name": sub.Name, "nodeCount": len(sub.Nodes), "updatedAt": sub.UpdatedAt}
+		}
+		for _, n := range sub.Nodes {
+			if n.ID == state.SelectedNodeID {
+				response["selectedNode"] = summarizeNode(n)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) listSubscriptions(w http.ResponseWriter, _ *http.Request) {
+	state := s.store.Snapshot()
+	result := make([]subscriptionSummary, 0, len(state.Subscriptions))
+	for _, sub := range state.Subscriptions {
+		result = append(result, summarizeSubscription(sub))
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) addSubscription(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		URL  string `json:"url"`
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	sub, err := s.subscriptions.Add(r.Context(), input.URL, input.Name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, summarizeSubscription(sub))
+}
+
+func (s *Server) getSubscription(w http.ResponseWriter, r *http.Request) {
+	sub, ok := findSubscription(s.store.Snapshot(), r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "subscription not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, summarizeSubscription(sub))
+}
+
+func (s *Server) updateSubscription(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		URL  string `json:"url"`
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	sub, err := s.subscriptions.Update(r.Context(), r.PathValue("id"), input.URL, input.Name)
+	if err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "subscription not found" {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summarizeSubscription(sub))
+}
+
+func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request) {
+	sub, err := s.subscriptions.Refresh(r.Context(), r.PathValue("id"))
+	if err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "subscription not found" {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summarizeSubscription(sub))
+}
+
+func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	id := r.PathValue("id")
+	state := s.store.Snapshot()
+	if state.ActiveSubscriptionID == id && s.xray.Status().Running {
+		if err := s.xray.Stop(); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not stop Xray before deleting active subscription")
+			return
+		}
+	}
+	if err := s.subscriptions.Delete(id); err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "subscription not found" {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if state.ActiveSubscriptionID == id {
+		if err := s.store.Update(func(state *storage.State) error { state.VPNEnabled = false; state.AutoMode = false; return nil }); err != nil {
+			writeError(w, http.StatusInternalServerError, "subscription was deleted but VPN state could not be saved")
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listNodes(w http.ResponseWriter, _ *http.Request) {
+	state := s.store.Snapshot()
+	nodes := make([]nodeSummary, 0)
+	for _, sub := range state.Subscriptions {
+		for _, n := range sub.Nodes {
+			summary := summarizeNode(n)
+			summary.SubscriptionID = sub.ID
+			summary.SubscriptionName = sub.Name
+			summary.Selected = n.ID == state.SelectedNodeID
+			nodes = append(nodes, summary)
+		}
+	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+func (s *Server) selectNode(w http.ResponseWriter, r *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	id := r.PathValue("id")
+	state := s.store.Snapshot()
+	var selectedSubscription string
+	found := false
+	for _, sub := range state.Subscriptions {
+		for _, n := range sub.Nodes {
+			if n.ID == id {
+				selectedSubscription, found = sub.ID, true
+				break
+			}
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if err := s.store.Update(func(state *storage.State) error {
+		state.ActiveSubscriptionID, state.SelectedNodeID = selectedSubscription, id
+		state.AutoMode = false
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save selected node")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getRouting(w http.ResponseWriter, _ *http.Request) {
+	state := s.store.Snapshot()
+	profile, ok := findRoutingProfile(state, state.ActiveRoutingID)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"profile": nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"profile": profile})
+}
+
+func (s *Server) importRouting(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Link string `json:"link"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	profile, err := routing.Import(input.Link)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.Update(func(state *storage.State) error {
+		state.RoutingProfiles = []routing.Profile{profile}
+		state.ActiveRoutingID = profile.ID
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save routing profile")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"profile": profile})
+}
+
+func (s *Server) deleteRouting(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	found := false
+	err := s.store.Update(func(state *storage.State) error {
+		profiles := make([]routing.Profile, 0, len(state.RoutingProfiles))
+		for _, profile := range state.RoutingProfiles {
+			if profile.ID == id {
+				found = true
+				continue
+			}
+			profiles = append(profiles, profile)
+		}
+		if found {
+			state.RoutingProfiles = profiles
+			if state.ActiveRoutingID == id {
+				state.ActiveRoutingID = ""
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not remove routing profile")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "routing profile not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	state := s.store.Snapshot()
+	selected, ok := selectedNode(state)
+	if !ok {
+		writeError(w, http.StatusConflict, "select a server before connecting")
+		return
+	}
+	if err := s.applyNode(r.Context(), state, selected, false); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connected": s.xray.Status().Running, "selectedNode": summarizeNode(selected)})
+}
+
+func (s *Server) autoConnect(w http.ResponseWriter, r *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	state := s.store.Snapshot()
+	if countNodes(state) == 0 {
+		writeError(w, http.StatusConflict, "add a subscription with servers before using auto mode")
+		return
+	}
+	candidates := s.probeCandidates(r.Context(), state, "")
+	if len(candidates) == 0 {
+		if err := s.store.Update(func(state *storage.State) error {
+			state.AutoMode = true
+			state.VPNEnabled = true
+			return nil
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not save automatic mode")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"connected": s.xray.Status().Running, "autoMode": true, "pending": true})
+		return
+	}
+	best := candidates[0]
+	if err := s.applyNode(r.Context(), state, best.node, true); err != nil {
+		writeError(w, http.StatusBadGateway, "best server passed its test but VPN could not start")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connected": s.xray.Status().Running, "autoMode": true, "selectedNode": summarizeNode(best.node), "latencyMs": best.latency.Milliseconds()})
+}
+
+func (s *Server) disableAuto(w http.ResponseWriter, _ *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if err := s.store.Update(func(state *storage.State) error {
+		state.AutoMode = false
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not stop automatic monitoring")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connected": s.xray.Status().Running, "autoMode": false})
+}
+
+func (s *Server) applyNode(ctx context.Context, state storage.State, selected node.Node, auto bool) error {
+	var profile *routing.Profile
+	if value, ok := findRoutingProfile(state, state.ActiveRoutingID); ok {
+		profile = &value
+	}
+	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile})
+	if err != nil {
+		return err
+	}
+	if err := s.xray.Apply(ctx, content); err != nil {
+		return err
+	}
+	if err := s.store.Update(func(state *storage.State) error {
+		state.SelectedNodeID = selected.ID
+		state.VPNEnabled = true
+		state.AutoMode = auto
+		for _, sub := range state.Subscriptions {
+			for _, candidate := range sub.Nodes {
+				if candidate.ID == selected.ID {
+					state.ActiveSubscriptionID = sub.ID
+					return nil
+				}
+			}
+		}
+		return errors.New("selected server was removed while connecting")
+	}); err != nil {
+		_ = s.xray.Stop()
+		return errors.New("could not save VPN state")
+	}
+	return nil
+}
+
+type reachableNode struct {
+	node    node.Node
+	latency time.Duration
+}
+
+func (s *Server) probeCandidates(ctx context.Context, state storage.State, excludeID string) []reachableNode {
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	nodes := make([]node.Node, 0)
+	for _, sub := range state.Subscriptions {
+		for _, candidate := range sub.Nodes {
+			if candidate.ID != excludeID {
+				nodes = append(nodes, candidate)
+			}
+		}
+	}
+	results := make(chan reachableNode, len(nodes))
+	semaphore := make(chan struct{}, 4)
+	var workers sync.WaitGroup
+	for _, current := range nodes {
+		current := current
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			select {
+			case semaphore <- struct{}{}:
+			case <-probeCtx.Done():
+				return
+			}
+			defer func() { <-semaphore }()
+			latency, err := xray.Probe(probeCtx, s.config.XrayBinary, current, s.config.Tunnel)
+			if err == nil {
+				results <- reachableNode{node: current, latency: latency}
+			}
+		}()
+	}
+	workers.Wait()
+	close(results)
+	candidates := make([]reachableNode, 0)
+	for candidate := range results {
+		candidates = append(candidates, candidate)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].latency < candidates[j].latency })
+	return candidates
+}
+
+func (s *Server) disconnect(w http.ResponseWriter, _ *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if err := s.xray.Stop(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.Update(func(state *storage.State) error { state.VPNEnabled = false; state.AutoMode = false; return nil }); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save VPN state")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"connected": false})
+}
+
+func (s *Server) restart(w http.ResponseWriter, _ *http.Request) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if err := s.xray.Restart(); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connected": s.xray.Status().Running})
+}
+
+// RunAutoMonitor keeps Auto mode active for the lifetime of the daemon. A failed
+// HTTPS GET through the current Xray SOCKS tunnel triggers a probe and failover.
+func (s *Server) RunAutoMonitor(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		state := s.store.Snapshot()
+		if !state.VPNEnabled || !state.AutoMode {
+			failures = 0
+			continue
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, 9*time.Second)
+		err := health.Check(checkCtx)
+		cancel()
+		if err == nil {
+			failures = 0
+			continue
+		}
+		failures++
+		s.logger.Warn("automatic VPN health check failed", "component", "auto", "failure", failures, "error", err.Error())
+		if failures < 2 {
+			continue
+		}
+		failures = 0
+
+		s.operationMu.Lock()
+		state = s.store.Snapshot()
+		if !state.VPNEnabled || !state.AutoMode {
+			s.operationMu.Unlock()
+			continue
+		}
+		excludeID := state.SelectedNodeID
+		if !s.xray.Status().Running {
+			excludeID = ""
+		}
+		candidates := s.probeCandidates(ctx, state, excludeID)
+		if len(candidates) == 0 {
+			s.logger.Error("automatic VPN failover found no working server", "component", "auto")
+			s.operationMu.Unlock()
+			continue
+		}
+		best := candidates[0]
+		if err := s.applyNode(ctx, state, best.node, true); err != nil {
+			s.logger.Error("automatic VPN failover could not apply server", "component", "auto", "server", best.node.ID, "error", err.Error())
+		} else {
+			s.logger.Info("automatic VPN switched server", "component", "auto", "server", best.node.Name, "latency_ms", best.latency.Milliseconds())
+		}
+		s.operationMu.Unlock()
+	}
+}
+
+func countNodes(state storage.State) int {
+	count := 0
+	for _, sub := range state.Subscriptions {
+		count += len(sub.Nodes)
+	}
+	return count
+}
+
+func (s *Server) systemInfo(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"platform": s.config.Platform, "architecture": runtime.GOARCH, "version": s.config.Version, "apiListenAddress": s.config.ListenAddress})
+}
+
+type subscriptionSummary struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	URL       string    `json:"url"`
+	NodeCount int       `json:"nodeCount"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+}
+
+type nodeSummary struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Protocol         string `json:"protocol"`
+	Address          string `json:"address"`
+	Port             uint16 `json:"port"`
+	Transport        string `json:"transport"`
+	Security         string `json:"security"`
+	SubscriptionID   string `json:"subscriptionId,omitempty"`
+	SubscriptionName string `json:"subscriptionName,omitempty"`
+	Selected         bool   `json:"selected,omitempty"`
+}
+
+func findRoutingProfile(state storage.State, id string) (routing.Profile, bool) {
+	for _, profile := range state.RoutingProfiles {
+		if profile.ID == id && id != "" {
+			return profile, true
+		}
+	}
+	return routing.Profile{}, false
+}
+
+func summarizeSubscription(sub subscription.Subscription) subscriptionSummary {
+	return subscriptionSummary{ID: sub.ID, Name: sub.Name, URL: maskURL(sub.URL), NodeCount: len(sub.Nodes), UpdatedAt: sub.UpdatedAt}
+}
+
+func summarizeNode(n node.Node) nodeSummary {
+	security := "none"
+	if n.TLS != nil {
+		security = "tls"
+	}
+	if n.Reality != nil {
+		security = "reality"
+	}
+	return nodeSummary{ID: n.ID, Name: n.Name, Protocol: string(n.Protocol), Address: n.Address, Port: n.Port, Transport: n.Transport.Type, Security: security}
+}
+
+func maskURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "••••••"
+	}
+	return u.Scheme + "://" + u.Host + "/••••••"
+}
+
+func findSubscription(state storage.State, id string) (subscription.Subscription, bool) {
+	for _, sub := range state.Subscriptions {
+		if sub.ID == id {
+			return sub, true
+		}
+	}
+	return subscription.Subscription{}, false
+}
+
+func selectedNode(state storage.State) (node.Node, bool) {
+	for _, sub := range state.Subscriptions {
+		for _, n := range sub.Nodes {
+			if n.ID == state.SelectedNodeID {
+				return n, true
+			}
+		}
+	}
+	return node.Node{}, false
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON request")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "request must contain one JSON value")
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Cache-Control", "no-store")
+		if origin := r.Header.Get("Origin"); origin != "" {
+			u, err := neturlParse(origin)
+			if err != nil || !strings.EqualFold(u.Host, r.Host) {
+				writeError(w, http.StatusForbidden, "cross-origin request denied")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func neturlParse(value string) (url.URL, error) {
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return url.URL{}, errors.New("invalid origin")
+	}
+	return *u, nil
+}
+
+func requestGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+			if r.Header.Get("Content-Type") != "" && !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+				writeError(w, http.StatusUnsupportedMediaType, "content type must be application/json")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func requestLog(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		next.ServeHTTP(w, r)
+		logger.Info("http request", "component", "api", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started).String())
+	})
+}

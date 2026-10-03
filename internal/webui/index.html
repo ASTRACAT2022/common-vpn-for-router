@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Common VPN</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="page">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark-wrap"><img class="brand-mark" src="/commonnetwork-mark.png" alt=""></span><div><strong>COMMON NETWORK</strong><small>VPN-клиент роутера</small></div></div>
+      <div id="connection-pill" class="pill disconnected"><span class="dot"></span><span id="connection-label">Отключён</span></div>
+    </header>
+
+    <section class="hero card">
+      <div>
+        <p class="eyebrow">ПОДКЛЮЧЕНИЕ</p>
+        <h1 id="hero-title">Ваш VPN готов</h1>
+        <p id="hero-description" class="muted">Добавьте ссылку на подписку и выберите сервер.</p>
+      </div>
+      <div class="actions">
+        <button id="connect" class="button primary" disabled>Подключиться</button>
+        <button id="disconnect" class="button secondary" disabled>Отключить</button>
+      </div>
+    </section>
+
+    <div id="notice" class="notice" role="status" hidden></div>
+
+    <section class="card">
+      <div class="section-heading"><div><p class="eyebrow">ВАША ПОДПИСКА</p><h2>Добавить подписку</h2></div></div>
+      <form id="subscription-form" class="form-row">
+        <label class="field grow"><span>Ссылка на подписку</span><input id="subscription-url" type="url" placeholder="https://…" required autocomplete="url"></label>
+        <label class="field name-field"><span>Название</span><input id="subscription-name" type="text" placeholder="Моя подписка" maxlength="80"></label>
+        <button class="button primary form-button" type="submit">Добавить</button>
+      </form>
+      <div id="subscriptions" class="subscription-list"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-heading"><div><p class="eyebrow">СЕРВЕР</p><h2>Выберите сервер</h2></div><div class="heading-actions"><button id="auto-connect" class="button secondary" type="button" title="Постоянно проверяет соединение GET-запросом и автоматически переключает VPN на рабочий сервер при сбое">Авто · лучший сервер</button><span id="node-count" class="count">0</span></div></div>
+      <div id="nodes" class="node-list"><p class="empty">Сначала добавьте подписку.</p></div>
+    </section>
+
+    <section class="card routing-card">
+      <div class="section-heading"><div><p class="eyebrow">ПО ЖЕЛАНИЮ</p><h2>Правила маршрутизации</h2></div></div>
+      <p class="muted">Можно импортировать ссылку Happ или Common. Если профиль не нужен, весь трафик пойдёт через выбранный VPN-сервер.</p>
+      <form id="routing-form" class="routing-form">
+        <label class="field grow"><span>Ссылка профиля</span><input id="routing-link" type="text" placeholder="happ://routing/onadd/…" autocomplete="off"></label>
+        <button class="button secondary form-button" type="submit">Импортировать</button>
+      </form>
+      <div id="routing-profile" class="profile-row"><span class="muted">Профиль не добавлен</span></div>
+    </section>
+
+    <footer>Настройки VPN хранятся на роутере. Xray Core должен быть установлен отдельно.</footer>
+  </main>
+</body>
+</html>

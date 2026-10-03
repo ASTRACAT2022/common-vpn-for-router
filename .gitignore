@@ -1,0 +1,5 @@
+/dist/
+/local-config/
+/local-data/
+*.tmp
+.DS_Store
