@@ -97,7 +97,7 @@ func ProbeWithInterface(ctx context.Context, binary string, selected node.Node, 
 	}
 	command := exec.CommandContext(probeCtx, binaryPath, "run", "-config", configPath)
 	var coreLogs probeLogBuffer
-	command.Stdout, command.Stderr = io.Discard, &coreLogs
+	command.Stdout, command.Stderr = &coreLogs, &coreLogs
 	if err := command.Start(); err != nil {
 		return 0, errors.New("could not start Xray probe")
 	}
