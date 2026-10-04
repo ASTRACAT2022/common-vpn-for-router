@@ -318,7 +318,7 @@ while :; do
     while :; do sleep 3600; done
   fi
   rm -f "$ZIP" "$STAGE"
-  if fetch "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/Xray-$XRAY_ARCH.zip" "$ZIP" \
+  if fetch "https://github.com/XTLS/Xray-core/releases/download/v$XRAY_VERSION/Xray-$XRAY_ARCH.zip" "$ZIP" \
     && extract_xray "$ZIP" geoip.dat > "$RUNTIME/.geoip.dat.$$" \
     && extract_xray "$ZIP" geosite.dat > "$RUNTIME/.geosite.dat.$$" \
     && [ -s "$RUNTIME/.geoip.dat.$$" ] && [ -s "$RUNTIME/.geosite.dat.$$" ]; then
