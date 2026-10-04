@@ -30,16 +30,17 @@ func (b *probeLogBuffer) Write(data []byte) (int, error) {
 	n := len(data)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	remaining := maxProbeLogBytes - len(b.data)
-	if remaining > 0 {
-		if remaining > n {
-			remaining = n
-		}
-		b.data = append(b.data, data[:remaining]...)
+	if n >= maxProbeLogBytes {
+		b.data = append(b.data[:0], data[n-maxProbeLogBytes:]...)
+		b.truncated = true
+		return n, nil
 	}
-	if n > remaining {
+	if overflow := len(b.data) + n - maxProbeLogBytes; overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
 		b.truncated = true
 	}
+	b.data = append(b.data, data...)
 	return n, nil
 }
 
@@ -54,10 +55,44 @@ func (b *probeLogBuffer) String() string {
 }
 
 func withProbeLogs(err error, logs string) error {
-	if logs = strings.TrimSpace(logs); logs != "" {
-		return fmt.Errorf("%w; Xray core: %s", err, logs)
+	if diagnostic := compactProbeLogs(logs); diagnostic != "" {
+		return fmt.Errorf("%w; Xray core: %s", err, diagnostic)
 	}
 	return err
+}
+
+func compactProbeLogs(logs string) string {
+	lines := strings.Split(strings.TrimSpace(logs), "\n")
+	selected := make([]string, 0, 3)
+	for i := len(lines) - 1; i >= 0 && len(selected) < 3; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "warn") ||
+			strings.Contains(lower, "fail") || strings.Contains(lower, "refused") ||
+			strings.Contains(lower, "closed") || strings.Contains(lower, "timeout") ||
+			strings.Contains(lower, "eof") || strings.Contains(lower, "reject") {
+			selected = append(selected, line)
+		}
+	}
+	if len(selected) == 0 {
+		for i := len(lines) - 1; i >= 0 && len(selected) < 2; i-- {
+			if line := strings.TrimSpace(lines[i]); line != "" {
+				selected = append(selected, line)
+			}
+		}
+	}
+	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
+		selected[left], selected[right] = selected[right], selected[left]
+	}
+	diagnostic := strings.Join(selected, " | ")
+	const maxDiagnosticBytes = 320
+	if len(diagnostic) > maxDiagnosticBytes {
+		diagnostic = diagnostic[len(diagnostic)-maxDiagnosticBytes:]
+	}
+	return diagnostic
 }
 
 // Probe measures a node with an HTTP GET through a temporary Xray process.
