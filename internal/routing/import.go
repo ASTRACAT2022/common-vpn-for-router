@@ -47,6 +47,8 @@ type happProfile struct {
 	GlobalProxy    flexibleBool       `json:"GlobalProxy"`
 	RouteOrder     string             `json:"RouteOrder"`
 	DomainStrategy string             `json:"DomainStrategy"`
+	GeoIPURL       string             `json:"Geoipurl"`
+	GeoSiteURL     string             `json:"Geositeurl"`
 	DirectSites    flexibleStringList `json:"DirectSites"`
 	DirectIP       flexibleStringList `json:"DirectIp"`
 	ProxySites     flexibleStringList `json:"ProxySites"`
@@ -126,7 +128,7 @@ func Import(raw string) (Profile, error) {
 	strategy := normalizeStrategy(input.DomainStrategy)
 	profile := Profile{
 		ID: stableID(string(data)), Name: strings.TrimSpace(input.Name), GlobalProxy: bool(input.GlobalProxy),
-		RouteOrder: order, DomainStrategy: strategy,
+		RouteOrder: order, DomainStrategy: strategy, GeoIPURL: strings.TrimSpace(input.GeoIPURL), GeoSiteURL: strings.TrimSpace(input.GeoSiteURL),
 		DirectDomains: cleanList([]string(input.DirectSites)), DirectIPs: cleanList([]string(input.DirectIP)),
 		ProxyDomains: cleanList([]string(input.ProxySites)), ProxyIPs: cleanList([]string(input.ProxyIP)),
 		BlockDomains: cleanList([]string(input.BlockSites)), BlockIPs: cleanList([]string(input.BlockIP)),

@@ -70,3 +70,16 @@ func TestNativeRulesAreNotSilentlyDropped(t *testing.T) {
 		t.Fatal("unsupported format silently accepted")
 	}
 }
+
+func TestImportKeepsHappGeoFiles(t *testing.T) {
+	profile, err := Import(`{"Name":"RoscomVPN","GlobalProxy":"true","Geoipurl":"https://example.org/geoip.dat","Geositeurl":"https://example.org/geosite.dat","BlockSites":["geosite:torrent"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.GeoIPURL != "https://example.org/geoip.dat" || profile.GeoSiteURL != "https://example.org/geosite.dat" {
+		t.Fatalf("Happ geo file URLs were dropped: %#v", profile)
+	}
+	if len(profile.BlockDomains) != 1 || profile.BlockDomains[0] != "geosite:torrent" {
+		t.Fatalf("Happ rule was dropped: %#v", profile)
+	}
+}

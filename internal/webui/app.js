@@ -24,7 +24,7 @@ function notice(message, error = false) {
   element.classList.toggle("error", error);
   element.hidden = false;
   clearTimeout(notice.timer);
-  notice.timer = setTimeout(() => { element.hidden = true; }, 6500);
+  if (!error) notice.timer = setTimeout(() => { element.hidden = true; }, 6500);
 }
 
 function updateConnection() {

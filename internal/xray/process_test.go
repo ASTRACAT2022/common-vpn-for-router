@@ -65,3 +65,28 @@ func TestApplyRestoresPreviousRunningConfigAfterFailedReplacement(t *testing.T) 
 		t.Fatal("prior Xray process was not restored after failed replacement")
 	}
 }
+
+func TestApplyWithAssetsUsesProfileGeoDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX test executable")
+	}
+	dir := t.TempDir()
+	assets := filepath.Join(dir, "custom-assets")
+	if err := os.Mkdir(assets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "xray-stub")
+	script := "#!/bin/sh\n[ \"$XRAY_LOCATION_ASSET\" = \"" + assets + "\" ] || exit 4\nif [ \"$2\" = \"-test\" ]; then exit 0; fi\nexec sleep 30\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XRAY_LOCATION_ASSET", filepath.Join(dir, "standard-assets"))
+	controller := NewController(binary, filepath.Join(dir, "xray.json"))
+	t.Cleanup(func() { _ = controller.Stop() })
+	if err := controller.ApplyWithAssets(context.Background(), []byte(`{"routing":{"rules":[]}}`), assets); err != nil {
+		t.Fatal(err)
+	}
+	if !controller.Status().Running {
+		t.Fatal("Xray did not start with the profile asset directory")
+	}
+}

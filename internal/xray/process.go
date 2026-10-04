@@ -30,13 +30,14 @@ type ProcessManager struct {
 	done      chan struct{}
 	startedAt time.Time
 	lastExit  string
+	assetDir  string
 }
 
 func NewProcessManager(binary, config string) *ProcessManager {
 	return &ProcessManager{binary: binary, config: config}
 }
 
-func (p *ProcessManager) ValidateConfig(ctx context.Context, path string) error {
+func (p *ProcessManager) ValidateConfig(ctx context.Context, path, assetDir string) error {
 	binary, err := exec.LookPath(p.binary)
 	if err != nil {
 		return errors.New("Xray executable was not found")
@@ -44,6 +45,7 @@ func (p *ProcessManager) ValidateConfig(ctx context.Context, path string) error 
 	checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(checkCtx, binary, "run", "-test", "-config", path)
+	cmd.Env = xrayEnvironment(assetDir)
 	output := &limitedOutput{limit: 2048}
 	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Run(); err != nil {
@@ -109,6 +111,7 @@ func (p *ProcessManager) Start() error {
 		return errors.New("Xray executable was not found")
 	}
 	cmd := exec.Command(binary, "run", "-config", p.config)
+	cmd.Env = xrayEnvironment(p.assetDir)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start Xray: %w", err)
@@ -196,6 +199,27 @@ func (p *ProcessManager) runningLocked() bool {
 	}
 }
 
+func (p *ProcessManager) setAssetDir(value string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	previous := p.assetDir
+	p.assetDir = value
+	return previous
+}
+
+func xrayEnvironment(assetDir string) []string {
+	if assetDir == "" {
+		return nil // inherit the service environment
+	}
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "XRAY_LOCATION_ASSET=") {
+			env = append(env, item)
+		}
+	}
+	return append(env, "XRAY_LOCATION_ASSET="+assetDir)
+}
+
 type Controller struct {
 	path    string
 	process *ProcessManager
@@ -206,6 +230,10 @@ func NewController(binary, configPath string) *Controller {
 }
 
 func (c *Controller) Apply(ctx context.Context, content []byte) error {
+	return c.ApplyWithAssets(ctx, content, "")
+}
+
+func (c *Controller) ApplyWithAssets(ctx context.Context, content []byte, assetDir string) error {
 	if !json.Valid(content) {
 		return errors.New("generated Xray configuration is invalid JSON")
 	}
@@ -236,7 +264,7 @@ func (c *Controller) Apply(ctx context.Context, content []byte) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if err := c.process.ValidateConfig(ctx, tempPath); err != nil {
+	if err := c.process.ValidateConfig(ctx, tempPath, assetDir); err != nil {
 		return err
 	}
 	previous, readErr := os.ReadFile(c.path)
@@ -255,7 +283,9 @@ func (c *Controller) Apply(ctx context.Context, content []byte) error {
 			return fmt.Errorf("stop current Xray: %w", err)
 		}
 	}
+	previousAssetDir := c.process.setAssetDir(assetDir)
 	if err := storage.AtomicWrite(c.path, content, 0o600); err != nil {
+		c.process.setAssetDir(previousAssetDir)
 		if wasRunning {
 			_ = c.process.Start()
 		}
@@ -267,6 +297,7 @@ func (c *Controller) Apply(ctx context.Context, content []byte) error {
 		} else {
 			_ = os.Remove(c.path)
 		}
+		c.process.setAssetDir(previousAssetDir)
 		if wasRunning && hadPrevious {
 			_ = c.process.Start()
 		}

@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -480,6 +482,18 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 	if value, ok := findRoutingProfile(state, state.ActiveRoutingID); ok {
 		profile = &value
 	}
+	assetDir := ""
+	if profile != nil && (profile.GeoIPURL != "" || profile.GeoSiteURL != "") {
+		standard := os.Getenv("XRAY_LOCATION_ASSET")
+		if standard == "" {
+			standard = filepath.Dir(s.config.XrayBinary)
+		}
+		var err error
+		assetDir, err = routing.EnsureAssets(ctx, *profile, filepath.Join(s.config.ConfigDir, "routing-assets"), standard)
+		if err != nil {
+			return fmt.Errorf("prepare routing geo files: %w", err)
+		}
+	}
 	uplink := ""
 	if s.config.Tunnel {
 		var err error
@@ -492,7 +506,7 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 	if err != nil {
 		return err
 	}
-	if err := s.xray.Apply(ctx, content); err != nil {
+	if err := s.xray.ApplyWithAssets(ctx, content, assetDir); err != nil {
 		return err
 	}
 	if err := s.store.Update(func(state *storage.State) error {

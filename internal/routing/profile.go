@@ -29,6 +29,8 @@ type Profile struct {
 	GlobalProxy    bool           `json:"globalProxy"`
 	RouteOrder     []Action       `json:"routeOrder"`
 	DomainStrategy DomainStrategy `json:"domainStrategy"`
+	GeoIPURL       string         `json:"geoipUrl,omitempty"`
+	GeoSiteURL     string         `json:"geositeUrl,omitempty"`
 	DirectDomains  []string       `json:"directDomains,omitempty"`
 	DirectIPs      []string       `json:"directIPs,omitempty"`
 	ProxyDomains   []string       `json:"proxyDomains,omitempty"`
@@ -53,6 +55,12 @@ func (p Profile) Validate() error {
 	case "", AsIs, IPIfNonMatch, IPOnDemand:
 	default:
 		return fmt.Errorf("unsupported domain strategy %q", p.DomainStrategy)
+	}
+	if err := validateAssetURL(p.GeoIPURL); err != nil {
+		return fmt.Errorf("geoip URL: %w", err)
+	}
+	if err := validateAssetURL(p.GeoSiteURL); err != nil {
+		return fmt.Errorf("geosite URL: %w", err)
 	}
 	if _, err := normalizeOrder(p.RouteOrder); err != nil {
 		return err
