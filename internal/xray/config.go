@@ -167,6 +167,11 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 		Outbounds: []Outbound{},
 		Routing:   RoutingConfig{DomainStrategy: "AsIs", Rules: []any{}},
 	}
+	if options.ProbeOnly {
+		// Temporary probes need the outbound handshake details when a node fails.
+		// Probe stderr/stdout is size-limited before it is returned to the API log.
+		config.Log.LogLevel = "debug"
+	}
 	if options.ProbeOnly && options.Tunnel {
 		// A route-less TUN inbound lets Xray identify and bind its outbound
 		// interface, so health probes do not loop into an already active TUN.
