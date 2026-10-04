@@ -10,12 +10,55 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"common-vpn-router/internal/node"
 )
 
 const probeTimeout = 7 * time.Second
+const maxProbeLogBytes = 8 << 10
+
+type probeLogBuffer struct {
+	mu        sync.Mutex
+	data      []byte
+	truncated bool
+}
+
+func (b *probeLogBuffer) Write(data []byte) (int, error) {
+	n := len(data)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := maxProbeLogBytes - len(b.data)
+	if remaining > 0 {
+		if remaining > n {
+			remaining = n
+		}
+		b.data = append(b.data, data[:remaining]...)
+	}
+	if n > remaining {
+		b.truncated = true
+	}
+	return n, nil
+}
+
+func (b *probeLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	result := strings.TrimSpace(string(b.data))
+	if b.truncated {
+		result += " [Xray log truncated]"
+	}
+	return result
+}
+
+func withProbeLogs(err error, logs string) error {
+	if logs = strings.TrimSpace(logs); logs != "" {
+		return fmt.Errorf("%w; Xray core: %s", err, logs)
+	}
+	return err
+}
 
 // Probe measures a node with an HTTP GET through a temporary Xray process.
 // It does not alter the active VPN process.
@@ -53,7 +96,8 @@ func ProbeWithInterface(ctx context.Context, binary string, selected node.Node, 
 		return 0, errors.New("could not write temporary probe configuration")
 	}
 	command := exec.CommandContext(probeCtx, binaryPath, "run", "-config", configPath)
-	command.Stdout, command.Stderr = io.Discard, io.Discard
+	var coreLogs probeLogBuffer
+	command.Stdout, command.Stderr = io.Discard, &coreLogs
 	if err := command.Start(); err != nil {
 		return 0, errors.New("could not start Xray probe")
 	}
@@ -64,14 +108,15 @@ func ProbeWithInterface(ctx context.Context, binary string, selected node.Node, 
 
 	if err := waitForListener(probeCtx, net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), done); err != nil {
 		if waitErr != nil {
-			return 0, errors.New("Xray rejected the probe configuration")
+			return 0, withProbeLogs(fmt.Errorf("Xray probe exited: %w", waitErr), coreLogs.String())
 		}
-		return 0, errors.New("Xray probe did not start")
+		return 0, withProbeLogs(errors.New("Xray probe did not start"), coreLogs.String())
 	}
 
 	started := time.Now()
 	if err := CheckHTTPGet(probeCtx, net.JoinHostPort("127.0.0.1", fmt.Sprint(port))); err != nil {
-		return 0, fmt.Errorf("server did not complete the HTTP GET health check: %w", err)
+		stopProbe(command, done)
+		return 0, withProbeLogs(fmt.Errorf("server did not complete the HTTP GET health check: %w", err), coreLogs.String())
 	}
 	return time.Since(started), nil
 }
