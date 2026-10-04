@@ -135,10 +135,11 @@ type serverSettings struct {
 }
 
 type Options struct {
-	Tunnel         bool
-	RoutingProfile *routing.Profile
-	SocksPort      uint16
-	ProbeOnly      bool
+	Tunnel            bool
+	RoutingProfile    *routing.Profile
+	SocksPort         uint16
+	ProbeOnly         bool
+	OutboundInterface string
 }
 
 const HealthSocksPort uint16 = 10810
@@ -171,16 +172,18 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 		// interface, so health probes do not loop into an already active TUN.
 		config.Inbounds = append(config.Inbounds, Inbound{
 			Tag: "probe-interface", Protocol: "tun",
-			Settings: map[string]any{"name": fmt.Sprintf("cvprobe%d", socksPort), "mtu": 1500, "autoOutboundsInterface": "auto"},
+			Settings: map[string]any{"name": fmt.Sprintf("cvprobe%d", socksPort), "mtu": 1500, "autoOutboundsInterface": outboundInterface(options.OutboundInterface)},
 		})
 	} else if options.Tunnel {
 		config.Inbounds = append(config.Inbounds, Inbound{
 			Tag: "router-tun", Protocol: "tun",
 			Settings: map[string]any{
 				"name": "commonvpn0", "mtu": 1500,
-				"gateway":                []string{"198.18.0.1/30", "fd00:ca:fe::1/126"},
-				"autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"},
-				"autoOutboundsInterface": "auto",
+				"gateway": []string{"198.18.0.1/30", "fd00:ca:fe::1/126"},
+				// Split defaults beat the router's WAN default route regardless of
+				// its metric, while connected LAN routes remain more specific.
+				"autoSystemRoutingTable": []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"},
+				"autoOutboundsInterface": outboundInterface(options.OutboundInterface),
 			},
 			Sniffing: Sniffing{Enabled: true, DestOverride: []string{"http", "tls", "quic"}},
 		})
@@ -216,6 +219,13 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 		return nil, errors.New("generated Xray config is invalid JSON")
 	}
 	return encoded, nil
+}
+
+func outboundInterface(name string) string {
+	if name == "" {
+		return "auto"
+	}
+	return name
 }
 
 func generateProxy(n node.Node) (Outbound, error) {

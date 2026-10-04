@@ -35,12 +35,12 @@ func main() {
 		os.Exit(1)
 	}
 	controller := xray.NewController(cfg.XrayBinary, cfg.XrayConfigPath())
+	server := api.NewServer(cfg, store, subscription.NewManager(store), controller, logger)
 	if store.Snapshot().VPNEnabled {
-		if err := controller.Start(); err != nil {
+		if err := server.RestoreVPN(context.Background()); err != nil {
 			logger.Error("could not restore VPN after startup", "component", "xray", "error", err.Error())
 		}
 	}
-	server := api.NewServer(cfg, store, subscription.NewManager(store), controller, logger)
 	httpServer := &http.Server{
 		Addr: cfg.ListenAddress, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,

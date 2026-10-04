@@ -17,6 +17,7 @@ import (
 
 	"common-vpn-router/internal/config"
 	"common-vpn-router/internal/health"
+	"common-vpn-router/internal/netroute"
 	"common-vpn-router/internal/node"
 	"common-vpn-router/internal/routing"
 	"common-vpn-router/internal/storage"
@@ -36,6 +37,22 @@ type Server struct {
 
 func NewServer(cfg config.Config, store *storage.Store, subs *subscription.Manager, controller *xray.Controller, logger *slog.Logger) *Server {
 	return &Server{config: cfg, store: store, subscriptions: subs, xray: controller, logger: logger}
+}
+
+// RestoreVPN regenerates the persisted Xray config with the current WAN
+// interface and routing settings before restarting an enabled tunnel.
+func (s *Server) RestoreVPN(ctx context.Context) error {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	state := s.store.Snapshot()
+	if !state.VPNEnabled {
+		return nil
+	}
+	selected, ok := selectedNode(state)
+	if !ok {
+		return errors.New("VPN is enabled but there is no selected server to restore")
+	}
+	return s.applyNode(ctx, state, selected, state.AutoMode)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -453,7 +470,15 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 	if value, ok := findRoutingProfile(state, state.ActiveRoutingID); ok {
 		profile = &value
 	}
-	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile})
+	uplink := ""
+	if s.config.Tunnel {
+		var err error
+		uplink, err = netroute.DefaultOutboundInterface()
+		if err != nil {
+			return fmt.Errorf("detect physical WAN interface for VPN tunnel: %w", err)
+		}
+	}
+	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, OutboundInterface: uplink})
 	if err != nil {
 		return err
 	}
@@ -488,6 +513,15 @@ type reachableNode struct {
 func (s *Server) probeCandidates(ctx context.Context, state storage.State, excludeID string) []reachableNode {
 	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	uplink := ""
+	if s.config.Tunnel {
+		var err error
+		uplink, err = netroute.DefaultOutboundInterface()
+		if err != nil {
+			s.logger.Error("automatic VPN cannot detect the physical WAN interface", "component", "auto", "error", err.Error())
+			return nil
+		}
+	}
 	nodes := make([]node.Node, 0)
 	for _, sub := range state.Subscriptions {
 		for _, candidate := range sub.Nodes {
@@ -510,9 +544,11 @@ func (s *Server) probeCandidates(ctx context.Context, state storage.State, exclu
 				return
 			}
 			defer func() { <-semaphore }()
-			latency, err := xray.Probe(probeCtx, s.config.XrayBinary, current, s.config.Tunnel)
+			latency, err := xray.ProbeWithInterface(probeCtx, s.config.XrayBinary, current, s.config.Tunnel, uplink)
 			if err == nil {
 				results <- reachableNode{node: current, latency: latency}
+			} else {
+				s.logger.Warn("automatic VPN server probe failed", "component", "auto", "node", current.ID, "error", err.Error())
 			}
 		}()
 	}

@@ -20,6 +20,12 @@ const probeTimeout = 7 * time.Second
 // Probe measures a node with an HTTPS GET through a temporary Xray process.
 // It does not alter the active VPN process.
 func Probe(ctx context.Context, binary string, selected node.Node, tunnelMode bool) (time.Duration, error) {
+	return ProbeWithInterface(ctx, binary, selected, tunnelMode, "")
+}
+
+// ProbeWithInterface measures a node while binding Xray's uplink to the
+// physical interface that carries the router's WAN default route.
+func ProbeWithInterface(ctx context.Context, binary string, selected node.Node, tunnelMode bool, outboundInterface string) (time.Duration, error) {
 	if err := selected.Validate(); err != nil {
 		return 0, err
 	}
@@ -29,7 +35,7 @@ func Probe(ctx context.Context, binary string, selected node.Node, tunnelMode bo
 	if err != nil {
 		return 0, errors.New("could not reserve a local probe port")
 	}
-	content, err := GenerateWithOptions(selected, Options{SocksPort: port, ProbeOnly: true, Tunnel: tunnelMode})
+	content, err := GenerateWithOptions(selected, Options{SocksPort: port, ProbeOnly: true, Tunnel: tunnelMode, OutboundInterface: outboundInterface})
 	if err != nil {
 		return 0, errors.New("could not generate probe configuration")
 	}
@@ -65,7 +71,7 @@ func Probe(ctx context.Context, binary string, selected node.Node, tunnelMode bo
 
 	started := time.Now()
 	if err := CheckHTTPGet(probeCtx, net.JoinHostPort("127.0.0.1", fmt.Sprint(port))); err != nil {
-		return 0, errors.New("server did not complete the HTTPS health check")
+		return 0, fmt.Errorf("server did not complete the HTTPS health check: %w", err)
 	}
 	return time.Since(started), nil
 }
