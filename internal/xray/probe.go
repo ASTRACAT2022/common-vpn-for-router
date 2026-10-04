@@ -220,15 +220,15 @@ func CheckHTTPGet(ctx context.Context, socksAddress string) error {
 		ForceAttemptHTTP2: false,
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
-	var lastErr error
-	// Plain HTTP is intentional: it supports VLESS nodes configured without TLS.
-	// HTTPS endpoints remain as fallbacks for networks that block the plain probe.
-	for _, endpoint := range []string{
-		"http://api.ipify.org",
-		"https://cp.cloudflare.com/generate_204",
-		"https://www.gstatic.com/generate_204",
-	} {
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   3 * time.Second,
+		// Do not follow an HTTP redirect to HTTPS: auto mode deliberately verifies
+		// reachability using plain HTTP, including for servers without TLS.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	var failures []error
+	for _, endpoint := range []string{"http://api.ipify.org", "http://connectivitycheck.gstatic.com/generate_204"} {
 		requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 		if err != nil {
@@ -238,20 +238,21 @@ func CheckHTTPGet(ctx context.Context, socksAddress string) error {
 		response, err := client.Do(request)
 		if err == nil {
 			_ = response.Body.Close()
-			if response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusOK {
+			if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusBadRequest {
 				cancel()
 				return nil
 			}
-			lastErr = errors.New("health endpoint returned an unexpected status")
+			failures = append(failures, fmt.Errorf("GET %s returned HTTP %d", endpoint, response.StatusCode))
 		} else {
-			lastErr = err
+			failures = append(failures, fmt.Errorf("GET %s: %w", endpoint, err))
 		}
 		cancel()
 		if ctx.Err() != nil {
-			return ctx.Err()
+			failures = append(failures, ctx.Err())
+			return errors.Join(failures...)
 		}
 	}
-	return lastErr
+	return errors.Join(failures...)
 }
 
 func stopProbe(command *exec.Cmd, done <-chan struct{}) {
