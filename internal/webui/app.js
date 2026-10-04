@@ -224,7 +224,7 @@ $("#auto-connect").addEventListener("click", async (event) => {
     const result = await api("/api/vpn/auto-connect", { method: "POST" });
     await refresh();
     if (result.pending) {
-      notice("Авто включён. Сейчас нет сервера, прошедшего HTTPS-проверку; клиент продолжит поиск и подключится сам, когда найдёт рабочий.");
+      notice("Авто включён. Сейчас нет сервера, прошедшего HTTP-проверку; клиент продолжит поиск и подключится сам, когда найдёт рабочий.");
     } else {
       notice(`Авто включён: ${result.selectedNode.name}, отклик ${result.latencyMs} мс. GET-проверка идёт каждые 10 секунд; при двух сбоях сервер сменится автоматически.`);
     }

@@ -587,7 +587,7 @@ func (s *Server) restart(w http.ResponseWriter, _ *http.Request) {
 }
 
 // RunAutoMonitor keeps Auto mode active for the lifetime of the daemon. A failed
-// HTTPS GET through the current Xray SOCKS tunnel triggers a probe and failover.
+// HTTP GET through the current Xray SOCKS tunnel triggers a probe and failover.
 func (s *Server) RunAutoMonitor(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()

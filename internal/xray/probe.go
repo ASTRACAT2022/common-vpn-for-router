@@ -17,7 +17,7 @@ import (
 
 const probeTimeout = 7 * time.Second
 
-// Probe measures a node with an HTTPS GET through a temporary Xray process.
+// Probe measures a node with an HTTP GET through a temporary Xray process.
 // It does not alter the active VPN process.
 func Probe(ctx context.Context, binary string, selected node.Node, tunnelMode bool) (time.Duration, error) {
 	return ProbeWithInterface(ctx, binary, selected, tunnelMode, "")
@@ -71,7 +71,7 @@ func ProbeWithInterface(ctx context.Context, binary string, selected node.Node, 
 
 	started := time.Now()
 	if err := CheckHTTPGet(probeCtx, net.JoinHostPort("127.0.0.1", fmt.Sprint(port))); err != nil {
-		return 0, fmt.Errorf("server did not complete the HTTPS health check: %w", err)
+		return 0, fmt.Errorf("server did not complete the HTTP GET health check: %w", err)
 	}
 	return time.Since(started), nil
 }
@@ -211,7 +211,7 @@ func writeAll(writer io.Writer, data []byte) error {
 	return nil
 }
 
-// CheckHTTPGet verifies an HTTPS endpoint through a running local Xray SOCKS inbound.
+// CheckHTTPGet verifies HTTP endpoints through a running local Xray SOCKS inbound.
 func CheckHTTPGet(ctx context.Context, socksAddress string) error {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
@@ -222,7 +222,13 @@ func CheckHTTPGet(ctx context.Context, socksAddress string) error {
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
 	var lastErr error
-	for _, endpoint := range []string{"https://cp.cloudflare.com/generate_204", "https://www.gstatic.com/generate_204"} {
+	// Plain HTTP is intentional: it supports VLESS nodes configured without TLS.
+	// HTTPS endpoints remain as fallbacks for networks that block the plain probe.
+	for _, endpoint := range []string{
+		"http://api.ipify.org",
+		"https://cp.cloudflare.com/generate_204",
+		"https://www.gstatic.com/generate_204",
+	} {
 		requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 		if err != nil {
