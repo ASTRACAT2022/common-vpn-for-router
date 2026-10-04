@@ -69,6 +69,10 @@ func ParseNodeURI(raw string) (node.Node, error) {
 	}
 	if n.Protocol == node.VLESS {
 		n.VLESS.Flow = q.Get("flow")
+		n.VLESS.Encryption = firstNonEmpty(q.Get("encryption"), "none")
+	}
+	if fm := q.Get("fm"); fm != "" {
+		n.FinalMask = json.RawMessage(fm)
 	}
 	security := strings.ToLower(q.Get("security"))
 	switch security {

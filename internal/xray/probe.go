@@ -142,8 +142,12 @@ func ProbeWithInterface(ctx context.Context, binary string, selected node.Node, 
 	defer stopProbe(command, done)
 
 	if err := waitForListener(probeCtx, net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), done); err != nil {
-		if waitErr != nil {
-			return 0, withProbeLogs(fmt.Errorf("Xray probe exited: %w", waitErr), coreLogs.String())
+		select {
+		case <-done:
+			if waitErr != nil {
+				return 0, withProbeLogs(fmt.Errorf("Xray probe exited: %w", waitErr), coreLogs.String())
+			}
+		default:
 		}
 		return 0, withProbeLogs(errors.New("Xray probe did not start"), coreLogs.String())
 	}

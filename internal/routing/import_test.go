@@ -57,3 +57,16 @@ func TestImportIgnoresDNSAndGeoFields(t *testing.T) {
 		t.Fatalf("non-routing Happ data leaked into the rules profile: %#v", profile)
 	}
 }
+
+func TestNativeRulesAreNotSilentlyDropped(t *testing.T) {
+	p, err := Import(`{"name":"native","globalProxy":true,"proxyDomains":["domain:example.net"],"blockIPs":["192.0.2.1"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.ProxyDomains) != 1 || len(p.BlockIPs) != 1 {
+		t.Fatal("native routing rules lost")
+	}
+	if _, err := Import(`{"routing":{"rules":[]}}`); err == nil {
+		t.Fatal("unsupported format silently accepted")
+	}
+}

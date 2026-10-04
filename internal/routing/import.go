@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -65,7 +66,13 @@ func Import(raw string) (Profile, error) {
 	} else if strings.HasPrefix(strings.ToLower(trimmed), "common://routing/onadd/") {
 		payload = trimmed[len("common://routing/onadd/"):]
 	}
-	payload = strings.TrimSpace(strings.SplitN(payload, "#", 2)[0])
+	if !strings.HasPrefix(payload, "{") {
+		payload = strings.SplitN(payload, "#", 2)[0]
+		if decoded, err := url.PathUnescape(payload); err == nil {
+			payload = decoded
+		}
+	}
+	payload = strings.TrimSpace(payload)
 	data := []byte(payload)
 	if !strings.HasPrefix(payload, "{") {
 		decoded, err := decodePayload(payload)
@@ -73,6 +80,40 @@ func Import(raw string) (Profile, error) {
 			return Profile{}, fmt.Errorf("%w: invalid Base64 payload", ErrInvalidLink)
 		}
 		data = decoded
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil || len(fields) == 0 {
+		return Profile{}, fmt.Errorf("%w: expected a routing profile object", ErrInvalidLink)
+	}
+	native := false
+	for key := range fields {
+		if key == "directDomains" || key == "directIPs" || key == "proxyDomains" || key == "proxyIPs" || key == "blockDomains" || key == "blockIPs" {
+			native = true
+		}
+	}
+	if native {
+		var profile Profile
+		if err := json.Unmarshal(data, &profile); err != nil {
+			return Profile{}, fmt.Errorf("%w: invalid native profile: %v", ErrInvalidLink, err)
+		}
+		profile.ID = stableID(string(data))
+		if profile.Name == "" {
+			profile.Name = "Imported routing profile"
+		}
+		if err := profile.Validate(); err != nil {
+			return Profile{}, err
+		}
+		return profile, nil
+	}
+	known := false
+	for key := range fields {
+		switch strings.ToLower(key) {
+		case "name", "globalproxy", "routeorder", "domainstrategy", "directsites", "directip", "proxysites", "proxyip", "blocksites", "blockip":
+			known = true
+		}
+	}
+	if !known {
+		return Profile{}, fmt.Errorf("%w: unsupported routing format", ErrInvalidLink)
 	}
 	var input happProfile
 	if err := json.Unmarshal(data, &input); err != nil {

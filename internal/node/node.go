@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -44,8 +45,9 @@ type RealityOptions struct {
 }
 
 type VLESSCredentials struct {
-	UUID string `json:"uuid"`
-	Flow string `json:"flow,omitempty"`
+	UUID       string `json:"uuid"`
+	Encryption string `json:"encryption,omitempty"`
+	Flow       string `json:"flow,omitempty"`
 }
 
 type VMessCredentials struct {
@@ -66,6 +68,7 @@ type ShadowsocksCredentials struct {
 // Node is the protocol-neutral representation saved by the subscription layer.
 // Credentials are intentionally omitted from API responses by the API DTO layer.
 type Node struct {
+	FinalMask   json.RawMessage         `json:"finalmask,omitempty"`
 	ID          string                  `json:"id"`
 	Name        string                  `json:"name"`
 	Protocol    Protocol                `json:"protocol"`
@@ -112,6 +115,12 @@ func (n Node) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported protocol %q", n.Protocol)
+	}
+	if len(n.FinalMask) > 0 {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(n.FinalMask, &obj); err != nil || obj == nil {
+			return errors.New("finalmask must be a JSON object")
+		}
 	}
 	transport := strings.ToLower(n.Transport.Type)
 	if transport == "" {

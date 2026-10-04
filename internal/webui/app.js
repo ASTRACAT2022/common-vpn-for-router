@@ -32,7 +32,7 @@ function updateConnection() {
   pill.classList.toggle("connected", ui.connected);
   pill.classList.toggle("disconnected", !ui.connected);
   $("#connection-label").textContent = ui.connected ? (ui.autoMode ? "АВТО · ONLINE" : "ONLINE") : (ui.autoMode ? "АВТО · ПОИСК" : "OFFLINE");
-  $("#hero-title").textContent = ui.connected ? "VPN подключён" : (ui.autoMode ? "Авто восстанавливает VPN" : "Ваш VPN готов");
+  $("#hero-title").textContent = ui.connected ? "VPN подключён" : (ui.autoMode ? "Авто восстанавливает VPN" : (ui.transportActive ? "Проверяем соединение" : "Ваш VPN готов"));
   $("#hero-description").textContent = ui.autoMode
     ? `${ui.selectedNode?.name || "Поиск рабочего сервера"} · авто проверяет VPN и переключит сервер при сбое.`
     : ui.connected
@@ -40,7 +40,7 @@ function updateConnection() {
       : (ui.selectedNode ? `Выбран сервер: ${ui.selectedNode.name}` : "Добавьте ссылку на подписку и выберите сервер.");
   $("#connect").textContent = ui.connected ? "Применить изменения" : "Подключиться";
   $("#connect").disabled = !ui.selectedNode;
-  $("#disconnect").disabled = !ui.connected;
+  $("#disconnect").disabled = !ui.vpnEnabled && !ui.transportActive && !ui.autoMode;
   $("#auto-connect").disabled = ui.nodes.length === 0;
   $("#auto-connect").textContent = ui.autoMode ? "Отключить авто" : "Авто · лучший сервер";
 }
@@ -48,6 +48,8 @@ function updateConnection() {
 async function loadStatus() {
   const status = await api("/api/status");
   ui.connected = status.connected;
+ ui.transportActive = Boolean(status.transportActive);
+ ui.vpnEnabled = Boolean(status.vpnEnabled);
   ui.autoMode = Boolean(status.autoMode);
   ui.selectedNode = status.selectedNode;
   const routingData = await api("/api/routing");
@@ -107,7 +109,7 @@ async function loadNodes() {
     row.addEventListener("click", async () => {
       try {
         await api(`/api/nodes/${encodeURIComponent(node.id)}/select`, { method: "POST" }); await refresh();
-        if (ui.connected) notice("Сервер выбран. Нажмите «Применить изменения», чтобы переключить VPN.");
+        if (ui.vpnEnabled) notice("Сервер применён. Проверяем соединение.");
       }
       catch (error) { notice(error.message, true); }
     });

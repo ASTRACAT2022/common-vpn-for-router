@@ -11,8 +11,8 @@ import (
 func TestSocksConnectAcceptsSuccessfulTunnelHandshake(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
+	defer server.Close()
 	go func() {
-		defer server.Close()
 		greeting := make([]byte, 3)
 		if _, err := io.ReadFull(server, greeting); err != nil {
 			return

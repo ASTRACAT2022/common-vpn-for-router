@@ -48,6 +48,8 @@ type RoutingConfig struct {
 }
 
 type StreamSettings struct {
+	FinalMask       json.RawMessage      `json:"finalmask,omitempty"`
+	TCPSettings     map[string]any       `json:"tcpSettings,omitempty"`
 	Network         string               `json:"network,omitempty"`
 	Security        string               `json:"security,omitempty"`
 	TLSSettings     *TLSSettings         `json:"tlsSettings,omitempty"`
@@ -252,7 +254,7 @@ func generateProxy(n node.Node) (Outbound, error) {
 			ID         string `json:"id"`
 			Encryption string `json:"encryption"`
 			Flow       string `json:"flow,omitempty"`
-		}{{ID: n.VLESS.UUID, Encryption: "none", Flow: n.VLESS.Flow}}})
+		}{{ID: n.VLESS.UUID, Encryption: vlessEncryption(n.VLESS.Encryption), Flow: n.VLESS.Flow}}})
 		settings = value
 	case node.VMess:
 		protocol = "vmess"
@@ -310,8 +312,19 @@ func generateStreamSettings(n node.Node) *StreamSettings {
 	if network == "" || network == "raw" {
 		network = "tcp"
 	}
-	settings := &StreamSettings{Network: network}
+	settings := &StreamSettings{Network: network, FinalMask: n.FinalMask}
 	switch network {
+	case "tcp":
+		if n.Transport.HeaderType == "http" {
+			request := map[string]any{}
+			if n.Transport.Host != "" {
+				request["headers"] = map[string]any{"Host": strings.Split(n.Transport.Host, ",")}
+			}
+			if n.Transport.Path != "" {
+				request["path"] = strings.Split(n.Transport.Path, ",")
+			}
+			settings.TCPSettings = map[string]any{"header": map[string]any{"type": "http", "request": request}}
+		}
 	case "ws":
 		var headers map[string]string
 		if n.Transport.Host != "" {
@@ -348,4 +361,11 @@ func generateStreamSettings(n node.Node) *StreamSettings {
 func rawJSON(value any) json.RawMessage {
 	b, _ := json.Marshal(value)
 	return b
+}
+
+func vlessEncryption(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }

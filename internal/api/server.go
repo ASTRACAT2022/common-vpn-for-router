@@ -33,6 +33,10 @@ type Server struct {
 	xray          *xray.Controller
 	logger        *slog.Logger
 	operationMu   sync.Mutex
+	healthMu      sync.Mutex
+	healthPID     int
+	healthOK      bool
+	healthAt      time.Time
 }
 
 func NewServer(cfg config.Config, store *storage.Store, subs *subscription.Manager, controller *xray.Controller, logger *slog.Logger) *Server {
@@ -86,7 +90,11 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	state := s.store.Snapshot()
 	status := s.xray.Status()
-	response := map[string]any{"connected": status.Running, "xray": status, "version": s.config.Version,
+	s.healthMu.Lock()
+	healthy := status.Running && s.healthPID == status.PID && s.healthOK
+	checkedAt := s.healthAt
+	s.healthMu.Unlock()
+	response := map[string]any{"connected": healthy, "transportActive": status.Running, "healthCheckedAt": checkedAt, "vpnEnabled": state.VPNEnabled, "xray": status, "version": s.config.Version,
 		"selectedNode": nil, "subscription": nil, "tunnel": s.config.Tunnel, "routing": nil, "autoMode": state.AutoMode}
 	if profile, ok := findRoutingProfile(state, state.ActiveRoutingID); ok {
 		response["routing"] = map[string]any{"id": profile.ID, "name": profile.Name, "globalProxy": profile.GlobalProxy}
@@ -185,13 +193,19 @@ func (s *Server) refreshSubscriptionData(ctx context.Context, id string, force b
 		return subscription.Subscription{}, err
 	}
 	state := s.store.Snapshot()
-	if state.ActiveSubscriptionID != id || hasNodeID(updated.Nodes, state.SelectedNodeID) {
+	if state.ActiveSubscriptionID != id {
 		return updated, nil
 	}
 	if len(updated.Nodes) == 0 {
 		return updated, errors.New("subscription contains no servers")
 	}
 	replacement := updated.Nodes[0]
+	for _, n := range updated.Nodes {
+		if n.ID == state.SelectedNodeID {
+			replacement = n
+			break
+		}
+	}
 	if state.AutoMode && state.VPNEnabled {
 		candidates := s.probeCandidates(ctx, state, "")
 		if len(candidates) > 0 {
@@ -212,18 +226,6 @@ func (s *Server) refreshSubscriptionData(ctx context.Context, id string, force b
 		return updated, errors.New("subscription updated, but the selected server could not be saved")
 	}
 	return updated, nil
-}
-
-func hasNodeID(nodes []node.Node, id string) bool {
-	if id == "" {
-		return false
-	}
-	for _, candidate := range nodes {
-		if candidate.ID == id {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +282,14 @@ func (s *Server) selectNode(w http.ResponseWriter, r *http.Request) {
 		for _, n := range sub.Nodes {
 			if n.ID == id {
 				selectedSubscription, found = sub.ID, true
+				if state.VPNEnabled {
+					if err := s.applyNode(r.Context(), state, n, false); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 				break
 			}
 		}
@@ -576,10 +586,16 @@ func (s *Server) disconnect(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"connected": false})
 }
 
-func (s *Server) restart(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) restart(w http.ResponseWriter, r *http.Request) {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
-	if err := s.xray.Restart(); err != nil {
+	state := s.store.Snapshot()
+	selected, ok := selectedNode(state)
+	if !ok {
+		writeError(w, http.StatusConflict, "select a server before restarting")
+		return
+	}
+	if err := s.applyNode(r.Context(), state, selected, state.AutoMode); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -600,13 +616,31 @@ func (s *Server) RunAutoMonitor(ctx context.Context) {
 		}
 
 		state := s.store.Snapshot()
-		if !state.VPNEnabled || !state.AutoMode {
+		if !state.VPNEnabled {
 			failures = 0
+			continue
+		}
+		before := s.xray.Status()
+		if !before.Running && !state.AutoMode {
+			if err := s.RestoreVPN(ctx); err != nil {
+				s.logger.Warn("VPN recovery failed", "error", err.Error())
+			}
 			continue
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, 9*time.Second)
 		err := health.Check(checkCtx)
 		cancel()
+		after := s.xray.Status()
+		if before.PID != after.PID {
+			continue
+		}
+		s.healthMu.Lock()
+		s.healthPID, s.healthOK, s.healthAt = after.PID, err == nil && after.Running, time.Now().UTC()
+		s.healthMu.Unlock()
+		if !state.AutoMode {
+			failures = 0
+			continue
+		}
 		if err == nil {
 			failures = 0
 			continue
@@ -624,11 +658,7 @@ func (s *Server) RunAutoMonitor(ctx context.Context) {
 			s.operationMu.Unlock()
 			continue
 		}
-		excludeID := state.SelectedNodeID
-		if !s.xray.Status().Running {
-			excludeID = ""
-		}
-		candidates := s.probeCandidates(ctx, state, excludeID)
+		candidates := s.probeCandidates(ctx, state, "")
 		if len(candidates) == 0 {
 			s.logger.Error("automatic VPN failover found no working server", "component", "auto")
 			s.operationMu.Unlock()
