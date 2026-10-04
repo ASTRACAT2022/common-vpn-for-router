@@ -235,6 +235,14 @@ else
   say "Xray Core $XRAY_VERSION уже установлен."
 fi
 if [ ! -s "$ASSETS/geoip.dat" ] || [ ! -s "$ASSETS/geosite.dat" ]; then
+  if ! command -v unzip >/dev/null 2>&1; then
+    if command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx unzip; then
+      unzip() { busybox unzip "$@"; }
+    elif command -v opkg >/dev/null 2>&1; then opkg update && opkg install unzip
+    elif command -v apk >/dev/null 2>&1; then apk update && apk add unzip
+    elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y unzip
+    else fail "для Xray geo-файлов нужен unzip."; fi
+  fi
   assets_ready=0
   for asset_arch in $XRAY_ARCHS; do
     asset_zip="$TMP/xray-assets.zip"

@@ -115,6 +115,7 @@ func (p *ProcessManager) Start() error {
 	}
 	done := make(chan struct{})
 	p.cmd, p.done, p.startedAt = cmd, done, time.Now().UTC()
+	p.lastExit = ""
 	go p.wait(cmd, done)
 	select {
 	case <-done:
