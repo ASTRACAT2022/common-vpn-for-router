@@ -44,9 +44,23 @@
       <div id="nodes" class="node-list"><p class="empty">Сначала добавьте подписку.</p></div>
     </section>
 
+    <section class="card traffic-card">
+      <div class="section-heading"><div><p class="eyebrow">ТРАФИК</p><h2>Что направлять через VPN</h2></div></div>
+      <form id="traffic-form" class="traffic-form">
+        <label class="field"><span>Режим</span><select id="traffic-mode">
+          <option value="all">Весь трафик</option>
+          <option value="telegram">Только Telegram</option>
+          <option value="happ">Правила Happ Routing</option>
+        </select></label>
+        <label class="field"><span>Устройства сети</span><textarea id="device-ips" rows="2" placeholder="Например: 10.10.10.25, 10.10.10.26"></textarea></label>
+        <p class="muted">Оставьте поле пустым для всей сети. Укажите IP через запятую или с новой строки, чтобы применять режим только к этим устройствам. Для надёжной работы закрепите IP за устройством в настройках DHCP роутера.</p>
+        <button class="button primary" type="submit">Сохранить и применить</button>
+      </form>
+    </section>
+
     <section class="card routing-card">
       <div class="section-heading"><div><p class="eyebrow">ПО ЖЕЛАНИЮ</p><h2>Правила маршрутизации</h2></div></div>
-      <p class="muted">Можно импортировать ссылку Happ или Common. Если профиль не нужен, весь трафик пойдёт через выбранный VPN-сервер.</p>
+      <p class="muted">Импортируйте ссылку Happ или Common для правил геоблока. После импорта режим «Правила Happ Routing» включится автоматически; другие режимы можно выбрать выше.</p>
       <form id="routing-form" class="routing-form">
         <label class="field grow"><span>Ссылка профиля</span><input id="routing-link" type="text" placeholder="happ://routing/onadd/…" autocomplete="off"></label>
         <button class="button secondary form-button" type="submit">Импортировать</button>

@@ -42,6 +42,7 @@ type Profile struct {
 type Rule struct {
 	Domain      []string `json:"domain,omitempty"`
 	IP          []string `json:"ip,omitempty"`
+	Source      []string `json:"source,omitempty"`
 	Network     string   `json:"network,omitempty"`
 	OutboundTag string   `json:"outboundTag"`
 	RuleTag     string   `json:"ruleTag,omitempty"`

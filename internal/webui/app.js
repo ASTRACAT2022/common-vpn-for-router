@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
-const ui = { connected: false, autoMode: false, selectedNode: null, nodes: [], routing: null };
+const ui = { connected: false, autoMode: false, selectedNode: null, nodes: [], routing: null, trafficMode: "all", deviceIPs: [] };
+let trafficDirty = false;
 
 if (new URLSearchParams(location.search).has("demo")) {
   const banner = document.createElement("div");
@@ -33,10 +34,12 @@ function updateConnection() {
   pill.classList.toggle("disconnected", !ui.connected);
   $("#connection-label").textContent = ui.connected ? (ui.autoMode ? "АВТО · ONLINE" : "ONLINE") : (ui.autoMode ? "АВТО · ПОИСК" : "OFFLINE");
   $("#hero-title").textContent = ui.connected ? "VPN подключён" : (ui.autoMode ? "Авто восстанавливает VPN" : (ui.transportActive ? "Проверяем соединение" : "Ваш VPN готов"));
+  const modeLabel = ui.trafficMode === "telegram" ? "только для Telegram" : ui.trafficMode === "happ" ? "по правилам Happ" : "для всего трафика";
+  const deviceLabel = ui.deviceIPs?.length ? ` · устройств: ${ui.deviceIPs.length}` : "";
   $("#hero-description").textContent = ui.autoMode
     ? `${ui.selectedNode?.name || "Поиск рабочего сервера"} · авто проверяет VPN и переключит сервер при сбое.`
     : ui.connected
-      ? `${ui.selectedNode?.name || "Сервер выбран"} · VPN ${ui.routing ? "с правилами маршрутизации" : "для всего трафика"}`
+      ? `${ui.selectedNode?.name || "Сервер выбран"} · VPN ${modeLabel}${deviceLabel}`
       : (ui.selectedNode ? `Выбран сервер: ${ui.selectedNode.name}` : "Добавьте ссылку на подписку и выберите сервер.");
   $("#connect").textContent = ui.connected ? "Применить изменения" : "Подключиться";
   $("#connect").disabled = !ui.selectedNode;
@@ -52,10 +55,20 @@ async function loadStatus() {
  ui.vpnEnabled = Boolean(status.vpnEnabled);
   ui.autoMode = Boolean(status.autoMode);
   ui.selectedNode = status.selectedNode;
+  ui.trafficMode = status.trafficMode || (status.routing ? "happ" : "all");
+  ui.deviceIPs = status.deviceIPs || [];
   const routingData = await api("/api/routing");
   ui.routing = routingData.profile;
   renderRouting();
+  renderTraffic();
   updateConnection();
+}
+
+function renderTraffic() {
+  $("#traffic-mode").querySelector('[value="happ"]').disabled = !ui.routing;
+  if (trafficDirty) return;
+  $("#traffic-mode").value = ui.trafficMode;
+  $("#device-ips").value = ui.deviceIPs.join(", ");
 }
 
 async function loadSubscriptions() {
@@ -135,7 +148,7 @@ function renderRouting() {
   const fallback = ui.routing.globalProxy ? "остальной трафик → VPN" : "остальной трафик → напрямую";
   const order = (ui.routing.routeOrder || ["block", "proxy", "direct"]).join(" → ");
   const meta = document.createElement("div"); meta.className = "profile-meta";
-  meta.textContent = `${ruleCount} правил · ${fallback} · порядок ${order}`;
+  meta.textContent = `${ui.trafficMode === "happ" ? "Активен" : "Сохранён, не активен"} · ${ruleCount} правил · ${fallback} · порядок ${order}`;
   details.append(title, meta);
   const ruleDetails = document.createElement("details"); ruleDetails.className = "profile-rules-details";
   ruleDetails.open = rulesExpanded;
@@ -191,8 +204,24 @@ $("#routing-form").addEventListener("submit", async (event) => {
   const button = event.submitter; button.disabled = true;
   try {
     const result = await api("/api/routing/import", { method: "POST", body: JSON.stringify({ link: $("#routing-link").value.trim() }) });
-    $("#routing-link").value = ""; await loadStatus();
+    $("#routing-link").value = ""; trafficDirty = false; await loadStatus();
     notice(result.applied ? "Правила импортированы и применены к VPN." : "Правила импортированы. Они применятся при подключении VPN.");
+  } catch (error) { notice(error.message, true); }
+  finally { button.disabled = false; }
+});
+
+$("#traffic-mode").addEventListener("change", () => { trafficDirty = true; });
+$("#device-ips").addEventListener("input", () => { trafficDirty = true; });
+$("#traffic-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  const deviceIPs = $("#device-ips").value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean);
+  try {
+    const result = await api("/api/traffic", { method: "PUT", body: JSON.stringify({ mode: $("#traffic-mode").value, deviceIPs }) });
+    trafficDirty = false;
+    await loadStatus();
+    notice(result.applied ? "Режим трафика применён к VPN." : "Режим сохранён и применится при подключении VPN.");
   } catch (error) { notice(error.message, true); }
   finally { button.disabled = false; }
 });

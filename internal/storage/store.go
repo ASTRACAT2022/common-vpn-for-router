@@ -18,6 +18,8 @@ type State struct {
 	SelectedNodeID       string               `json:"selectedNodeId,omitempty"`
 	RoutingProfiles      []routing.Profile    `json:"routingProfiles,omitempty"`
 	ActiveRoutingID      string               `json:"activeRoutingId,omitempty"`
+	TrafficMode          routing.TrafficMode  `json:"trafficMode,omitempty"`
+	DeviceIPs            []string             `json:"deviceIPs,omitempty"`
 	VPNEnabled           bool                 `json:"vpnEnabled,omitempty"`
 	AutoMode             bool                 `json:"autoMode,omitempty"`
 }

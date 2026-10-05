@@ -139,6 +139,8 @@ type serverSettings struct {
 type Options struct {
 	Tunnel            bool
 	RoutingProfile    *routing.Profile
+	TrafficMode       routing.TrafficMode
+	DeviceIPs         []string
 	SocksPort         uint16
 	ProbeOnly         bool
 	OutboundInterface string
@@ -203,7 +205,12 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 	if !options.ProbeOnly {
 		config.Routing.Rules = append(config.Routing.Rules, map[string]any{"type": "field", "inboundTag": []string{"auto-health"}, "outboundTag": "proxy", "ruleTag": "common-auto-health"})
 	}
-	if options.RoutingProfile != nil {
+	mode := routing.EffectiveTrafficMode(options.TrafficMode, options.RoutingProfile != nil)
+	deviceIPs, err := routing.ValidateTraffic(mode, options.DeviceIPs, options.RoutingProfile != nil)
+	if err != nil {
+		return nil, fmt.Errorf("invalid traffic selection: %w", err)
+	}
+	if mode == routing.TrafficHapp {
 		rules, err := options.RoutingProfile.Rules()
 		if err != nil {
 			return nil, fmt.Errorf("invalid routing profile: %w", err)
@@ -213,8 +220,23 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 			config.Routing.DomainStrategy = "AsIs"
 		}
 		for _, rule := range rules {
+			rule.Source = deviceIPs
 			config.Routing.Rules = append(config.Routing.Rules, rule)
 		}
+		if len(deviceIPs) > 0 {
+			config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "other-devices"})
+		}
+	} else if mode == routing.TrafficTelegram {
+		config.Routing.Rules = append(config.Routing.Rules,
+			routing.Rule{Domain: routing.TelegramDomains, Source: deviceIPs, OutboundTag: "proxy", RuleTag: "telegram-domains"},
+			routing.Rule{IP: routing.TelegramIPs, Source: deviceIPs, OutboundTag: "proxy", RuleTag: "telegram-datacenters"},
+		)
+		config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "telegram-fallback"})
+	} else if len(deviceIPs) > 0 {
+		config.Routing.Rules = append(config.Routing.Rules,
+			routing.Rule{Source: deviceIPs, Network: "tcp,udp", OutboundTag: "proxy", RuleTag: "selected-devices"},
+			routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "other-devices"},
+		)
 	} else {
 		config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "proxy", RuleTag: "default-proxy"})
 	}

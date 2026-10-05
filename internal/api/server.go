@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/nodes", s.listNodes)
 	mux.HandleFunc("POST /api/nodes/{id}/select", s.selectNode)
 	mux.HandleFunc("GET /api/routing", s.getRouting)
+	mux.HandleFunc("PUT /api/traffic", s.updateTraffic)
 	mux.HandleFunc("POST /api/routing/import", s.importRouting)
 	mux.HandleFunc("DELETE /api/routing/{id}", s.deleteRouting)
 	mux.HandleFunc("POST /api/vpn/connect", s.connect)
@@ -91,14 +92,16 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	state := s.store.Snapshot()
+	profile, hasProfile := findRoutingProfile(state, state.ActiveRoutingID)
 	status := s.xray.Status()
 	s.healthMu.Lock()
 	healthy := status.Running && s.healthPID == status.PID && s.healthOK
 	checkedAt := s.healthAt
 	s.healthMu.Unlock()
 	response := map[string]any{"connected": healthy, "transportActive": status.Running, "healthCheckedAt": checkedAt, "vpnEnabled": state.VPNEnabled, "xray": status, "version": s.config.Version,
-		"selectedNode": nil, "subscription": nil, "tunnel": s.config.Tunnel, "routing": nil, "autoMode": state.AutoMode}
-	if profile, ok := findRoutingProfile(state, state.ActiveRoutingID); ok {
+		"selectedNode": nil, "subscription": nil, "tunnel": s.config.Tunnel, "routing": nil, "autoMode": state.AutoMode,
+		"trafficMode": routing.EffectiveTrafficMode(state.TrafficMode, hasProfile), "deviceIPs": state.DeviceIPs}
+	if hasProfile {
 		response["routing"] = map[string]any{"id": profile.ID, "name": profile.Name, "globalProxy": profile.GlobalProxy}
 	}
 	for _, sub := range state.Subscriptions {
@@ -321,6 +324,58 @@ func (s *Server) getRouting(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"profile": profile})
 }
 
+func (s *Server) updateTraffic(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Mode      routing.TrafficMode `json:"mode"`
+		DeviceIPs []string            `json:"deviceIPs"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	previous := s.store.Snapshot()
+	_, hasProfile := findRoutingProfile(previous, previous.ActiveRoutingID)
+	devices, err := routing.ValidateTraffic(input.Mode, input.DeviceIPs, hasProfile)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.Update(func(state *storage.State) error {
+		state.TrafficMode = input.Mode
+		state.DeviceIPs = devices
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save traffic settings")
+		return
+	}
+	applied := false
+	if s.xray.Status().Running {
+		state := s.store.Snapshot()
+		selected, ok := selectedNode(state)
+		if !ok {
+			s.restoreTrafficState(previous)
+			writeError(w, http.StatusConflict, "traffic settings were not applied because no server is selected")
+			return
+		}
+		if err := s.applyNode(r.Context(), state, selected, state.AutoMode); err != nil {
+			s.restoreTrafficState(previous)
+			writeError(w, http.StatusBadGateway, "traffic settings were not applied: "+err.Error())
+			return
+		}
+		applied = true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mode": input.Mode, "deviceIPs": devices, "applied": applied})
+}
+
+func (s *Server) restoreTrafficState(previous storage.State) {
+	_ = s.store.Update(func(state *storage.State) error {
+		state.TrafficMode = previous.TrafficMode
+		state.DeviceIPs = previous.DeviceIPs
+		return nil
+	})
+}
+
 func (s *Server) importRouting(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Link string `json:"link"`
@@ -339,6 +394,7 @@ func (s *Server) importRouting(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Update(func(state *storage.State) error {
 		state.RoutingProfiles = []routing.Profile{profile}
 		state.ActiveRoutingID = profile.ID
+		state.TrafficMode = routing.TrafficHapp
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save routing profile")
@@ -382,6 +438,7 @@ func (s *Server) deleteRouting(w http.ResponseWriter, r *http.Request) {
 			state.RoutingProfiles = profiles
 			if state.ActiveRoutingID == id {
 				state.ActiveRoutingID = ""
+				state.TrafficMode = routing.TrafficAll
 			}
 		}
 		return nil
@@ -415,6 +472,7 @@ func (s *Server) restoreRoutingState(previous storage.State) {
 	_ = s.store.Update(func(state *storage.State) error {
 		state.RoutingProfiles = previous.RoutingProfiles
 		state.ActiveRoutingID = previous.ActiveRoutingID
+		state.TrafficMode = previous.TrafficMode
 		return nil
 	})
 }
@@ -479,7 +537,9 @@ func (s *Server) disableAuto(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) applyNode(ctx context.Context, state storage.State, selected node.Node, auto bool) error {
 	var profile *routing.Profile
-	if value, ok := findRoutingProfile(state, state.ActiveRoutingID); ok {
+	value, hasProfile := findRoutingProfile(state, state.ActiveRoutingID)
+	mode := routing.EffectiveTrafficMode(state.TrafficMode, hasProfile)
+	if hasProfile && mode == routing.TrafficHapp {
 		profile = &value
 	}
 	assetDir := ""
@@ -502,7 +562,7 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 			return fmt.Errorf("detect physical WAN interface for VPN tunnel: %w", err)
 		}
 	}
-	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, OutboundInterface: uplink})
+	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, TrafficMode: mode, DeviceIPs: state.DeviceIPs, OutboundInterface: uplink})
 	if err != nil {
 		return err
 	}
