@@ -83,13 +83,16 @@ const policyModes = [
   ["geoblock", "Геоблок"], ["telegram", "Telegram"], ["youtube", "YouTube"], ["happ", "Свой Happ"],
 ];
 
-function createDeviceRow(policy, caption, removable = false) {
-  const row = document.createElement("div"); row.className = "device-option";
+function createDeviceRow(policy, name, details, removable = false) {
+  const row = document.createElement("div"); row.className = `device-option${removable ? " removable" : ""}`;
   if (policy.mac) row.dataset.mac = policy.mac;
   if (policy.ip) row.dataset.ip = policy.ip;
-  const title = document.createElement("span"); title.className = "device-caption"; title.textContent = caption;
+  const info = document.createElement("div"); info.className = "device-info";
+  const title = document.createElement("strong"); title.className = "device-name"; title.textContent = name;
+  const meta = document.createElement("span"); meta.className = "device-meta"; meta.textContent = details;
+  info.append(title, meta);
   const select = document.createElement("select"); select.className = "device-policy-mode";
-  select.setAttribute("aria-label", `Режим для ${caption}`);
+  select.setAttribute("aria-label", `Режим для ${name}`);
   for (const [value, label] of policyModes) {
     const option = document.createElement("option"); option.value = value; option.textContent = label;
     option.disabled = value === "happ" && !ui.routing && policy.mode !== "happ";
@@ -97,10 +100,10 @@ function createDeviceRow(policy, caption, removable = false) {
   }
   select.value = policy.mode || "";
   select.addEventListener("change", () => { trafficDirty = true; });
-  row.append(title, select);
+  row.append(info, select);
   if (removable) {
     const remove = document.createElement("button"); remove.type = "button"; remove.className = "remove-profile";
-    remove.textContent = "Убрать"; remove.setAttribute("aria-label", `Убрать ${caption}`);
+    remove.textContent = "Убрать"; remove.setAttribute("aria-label", `Убрать ${name}`);
     remove.addEventListener("click", () => { row.remove(); trafficDirty = true; });
     row.append(remove);
   }
@@ -111,15 +114,23 @@ function renderDevices() {
   if (trafficDirty) return;
   const container = $("#device-picker");
   container.replaceChildren();
+  if (ui.devices.length || ui.devicePolicies.length) {
+    const heading = document.createElement("div"); heading.className = "device-list-heading";
+    const deviceLabel = document.createElement("span"); deviceLabel.textContent = "Устройство";
+    const modeLabel = document.createElement("span"); modeLabel.textContent = "Режим";
+    heading.append(deviceLabel, modeLabel); container.append(heading);
+  }
   const discovered = new Set();
   for (const device of ui.devices) {
     discovered.add(device.mac);
     const policy = ui.devicePolicies.find(item => item.mac === device.mac);
-    container.append(createDeviceRow({ mac: device.mac, mode: policy?.mode || "" }, `${device.name || device.mac} · ${device.ips.join(", ")} · ${device.mac}`));
+    const name = device.name && device.name !== device.mac ? device.name : device.mac;
+    const details = `${device.ips.join(", ")} · ${device.mac}`;
+    container.append(createDeviceRow({ mac: device.mac, mode: policy?.mode || "" }, name, details));
   }
   for (const policy of ui.devicePolicies) {
     if (policy.mac && discovered.has(policy.mac)) continue;
-    container.append(createDeviceRow(policy, `${policy.mac || policy.ip} · вручную`, true));
+    container.append(createDeviceRow(policy, policy.mac || policy.ip, "Добавлено вручную", true));
   }
   if (!container.children.length) {
     const empty = document.createElement("span"); empty.className = "muted";
@@ -318,7 +329,13 @@ function addManualDevice(kind) {
   const duplicate = [...document.querySelectorAll("#device-picker .device-option")].some(row => row.dataset[key] === value);
   if (duplicate) { notice("Это устройство уже есть в списке. Выберите для него режим.", true); return; }
   $("#device-picker .muted")?.remove();
-  $("#device-picker").append(createDeviceRow({ [key]: value, mode: "geoblock" }, `${value} · вручную`, true));
+  if (!$("#device-picker .device-list-heading")) {
+    const heading = document.createElement("div"); heading.className = "device-list-heading";
+    const deviceLabel = document.createElement("span"); deviceLabel.textContent = "Устройство";
+    const modeLabel = document.createElement("span"); modeLabel.textContent = "Режим";
+    heading.append(deviceLabel, modeLabel); $("#device-picker").append(heading);
+  }
+  $("#device-picker").append(createDeviceRow({ [key]: value, mode: "geoblock" }, value, "Добавлено вручную", true));
   input.value = "";
   trafficDirty = true;
 }
