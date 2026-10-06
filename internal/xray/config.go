@@ -141,6 +141,7 @@ type Options struct {
 	RoutingProfile    *routing.Profile
 	TrafficMode       routing.TrafficMode
 	DeviceIPs         []string
+	RestrictDevices   bool
 	SocksPort         uint16
 	ProbeOnly         bool
 	OutboundInterface string
@@ -210,7 +211,9 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid traffic selection: %w", err)
 	}
-	if mode == routing.TrafficHapp {
+	if options.RestrictDevices && len(deviceIPs) == 0 {
+		config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "unresolved-devices"})
+	} else if mode == routing.TrafficHapp {
 		rules, err := options.RoutingProfile.Rules()
 		if err != nil {
 			return nil, fmt.Errorf("invalid routing profile: %w", err)
@@ -223,7 +226,7 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 			rule.Source = deviceIPs
 			config.Routing.Rules = append(config.Routing.Rules, rule)
 		}
-		if len(deviceIPs) > 0 {
+		if options.RestrictDevices || len(deviceIPs) > 0 {
 			config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "other-devices"})
 		}
 	} else if mode == routing.TrafficTelegram {

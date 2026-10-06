@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const ui = { connected: false, autoMode: false, selectedNode: null, nodes: [], routing: null, trafficMode: "all", deviceIPs: [] };
+const ui = { connected: false, autoMode: false, selectedNode: null, nodes: [], routing: null, trafficMode: "all", deviceIPs: [], deviceMACs: [], devices: [] };
 let trafficDirty = false;
 
 if (new URLSearchParams(location.search).has("demo")) {
@@ -35,7 +35,8 @@ function updateConnection() {
   $("#connection-label").textContent = ui.connected ? (ui.autoMode ? "АВТО · ONLINE" : "ONLINE") : (ui.autoMode ? "АВТО · ПОИСК" : "OFFLINE");
   $("#hero-title").textContent = ui.connected ? "VPN подключён" : (ui.autoMode ? "Авто восстанавливает VPN" : (ui.transportActive ? "Проверяем соединение" : "Ваш VPN готов"));
   const modeLabel = ui.trafficMode === "telegram" ? "только для Telegram" : ui.trafficMode === "happ" ? "по правилам Happ" : "для всего трафика";
-  const deviceLabel = ui.deviceIPs?.length ? ` · устройств: ${ui.deviceIPs.length}` : "";
+  const count = (ui.deviceMACs?.length || 0) + (ui.deviceIPs?.length || 0);
+  const deviceLabel = count ? ` · устройств: ${count}` : "";
   $("#hero-description").textContent = ui.autoMode
     ? `${ui.selectedNode?.name || "Поиск рабочего сервера"} · авто проверяет VPN и переключит сервер при сбое.`
     : ui.connected
@@ -57,6 +58,7 @@ async function loadStatus() {
   ui.selectedNode = status.selectedNode;
   ui.trafficMode = status.trafficMode || (status.routing ? "happ" : "all");
   ui.deviceIPs = status.deviceIPs || [];
+  ui.deviceMACs = status.deviceMACs || [];
   const routingData = await api("/api/routing");
   ui.routing = routingData.profile;
   renderRouting();
@@ -69,6 +71,60 @@ function renderTraffic() {
   if (trafficDirty) return;
   $("#traffic-mode").value = ui.trafficMode;
   $("#device-ips").value = ui.deviceIPs.join(", ");
+  $("#device-macs").value = ui.deviceMACs.filter(mac => !ui.devices.some(device => device.mac === mac)).join(", ");
+  renderDevices();
+}
+
+function renderDevices() {
+  if (trafficDirty) return;
+  const container = $("#device-picker");
+  container.replaceChildren();
+  if (!ui.devices.length) {
+    const empty = document.createElement("span"); empty.className = "muted";
+    empty.textContent = "Устройства пока не обнаружены. MAC можно указать вручную.";
+    container.append(empty); return;
+  }
+  for (const device of ui.devices) {
+    const label = document.createElement("label"); label.className = "device-option";
+    const box = document.createElement("input"); box.type = "checkbox"; box.value = device.mac;
+    box.checked = ui.deviceMACs.includes(device.mac);
+    box.addEventListener("change", () => { trafficDirty = true; });
+    const caption = document.createElement("span");
+    caption.textContent = `${device.name || device.mac} · ${device.ips.join(", ")} · ${device.mac}`;
+    label.append(box, caption); container.append(label);
+  }
+}
+
+async function loadDevices() {
+  ui.devices = await api("/api/devices");
+  renderDevices();
+  const traffic = await api("/api/device-traffic");
+  const container = $("#device-traffic"); container.replaceChildren();
+  if (!traffic.available) {
+    const message = document.createElement("p"); message.className = "muted";
+    message.textContent = `Счётчики недоступны: ${traffic.reason}`;
+    container.append(message); return;
+  }
+  if (!traffic.devices.length) {
+    const empty = document.createElement("p"); empty.className = "empty";
+    empty.textContent = "Устройства пока не обнаружены."; container.append(empty); return;
+  }
+  for (const device of traffic.devices) {
+    const row = document.createElement("div"); row.className = "traffic-row";
+    const name = document.createElement("span"); name.textContent = `${device.name || device.mac} · ${device.ips.join(", ")}`;
+    const bytes = document.createElement("strong");
+    bytes.textContent = `↑ ${formatBytes(device.uploadBytes)}  ↓ ${formatBytes(device.downloadBytes)}`;
+    row.append(name, bytes); container.append(row);
+  }
+}
+
+function formatBytes(value) {
+  if (value < 1024) return `${value} Б`;
+  const units = ["КБ", "МБ", "ГБ", "ТБ"];
+  let scaled = value;
+  let index = -1;
+  do { scaled /= 1024; index++; } while (scaled >= 1024 && index < units.length - 1);
+  return `${scaled.toFixed(1)} ${units[index]}`;
 }
 
 async function loadSubscriptions() {
@@ -99,7 +155,15 @@ async function loadSubscriptions() {
         update.disabled = false; update.textContent = "Обновить";
       }
     });
-    row.append(details, update); container.append(row);
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "button secondary subscription-update"; remove.textContent = "Удалить";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`Удалить подписку «${sub.name}»?`)) return;
+      remove.disabled = true;
+      try { await api(`/api/subscriptions/${encodeURIComponent(sub.id)}`, { method: "DELETE" }); await refresh(); notice("Подписка удалена."); }
+      catch (error) { remove.disabled = false; notice(error.message, true); }
+    });
+    const actions = document.createElement("div"); actions.className = "subscription-actions"; actions.append(update, remove);
+    row.append(details, actions); container.append(row);
   }
 }
 
@@ -185,7 +249,8 @@ function renderRouting() {
 }
 
 async function refresh() {
-  await Promise.all([loadStatus(), loadSubscriptions(), loadNodes()]);
+  await loadStatus();
+  await Promise.all([loadSubscriptions(), loadNodes(), loadDevices()]);
 }
 
 $("#subscription-form").addEventListener("submit", async (event) => {
@@ -212,13 +277,15 @@ $("#routing-form").addEventListener("submit", async (event) => {
 
 $("#traffic-mode").addEventListener("change", () => { trafficDirty = true; });
 $("#device-ips").addEventListener("input", () => { trafficDirty = true; });
+$("#device-macs").addEventListener("input", () => { trafficDirty = true; });
 $("#traffic-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.submitter;
   button.disabled = true;
   const deviceIPs = $("#device-ips").value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean);
+  const deviceMACs = [...document.querySelectorAll("#device-picker input:checked")].map(box => box.value).concat($("#device-macs").value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean));
   try {
-    const result = await api("/api/traffic", { method: "PUT", body: JSON.stringify({ mode: $("#traffic-mode").value, deviceIPs }) });
+    const result = await api("/api/traffic", { method: "PUT", body: JSON.stringify({ mode: $("#traffic-mode").value, deviceIPs, deviceMACs }) });
     trafficDirty = false;
     await loadStatus();
     notice(result.applied ? "Режим трафика применён к VPN." : "Режим сохранён и применится при подключении VPN.");

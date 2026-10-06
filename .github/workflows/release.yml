@@ -20,11 +20,41 @@ jobs:
           cache: true
       - name: Build release archives
         run: make release-linux VERSION="${GITHUB_REF_NAME}"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+      - name: Build Common VPN Xray Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v26.6.27 https://github.com/XTLS/Xray-core.git /tmp/commonvpn-xray-source
+          test "$(git -C /tmp/commonvpn-xray-source rev-parse HEAD)" = 45cf2898ab12e97a55dd8f1f3d78d903340bdc9e
+          python3 scripts/patch-xray.py /tmp/commonvpn-xray-source
+          tar -czf "${GITHUB_WORKSPACE}/dist/common-vpn-xray-source-v26.6.27.tar.gz" -C /tmp/commonvpn-xray-source --exclude=.git .
+          curl -fL --retry 3 -o /tmp/commonvpn-xray-assets.zip https://github.com/XTLS/Xray-core/releases/download/v26.6.27/Xray-linux-arm64-v8a.zip
+          mkdir -p /tmp/commonvpn-xray-package
+          cp /tmp/commonvpn-xray-source/LICENSE /tmp/commonvpn-xray-package/LICENSE
+          unzip -p /tmp/commonvpn-xray-assets.zip geoip.dat > /tmp/commonvpn-xray-package/geoip.dat
+          unzip -p /tmp/commonvpn-xray-assets.zip geosite.dat > /tmp/commonvpn-xray-package/geosite.dat
+          cd /tmp/commonvpn-xray-source
+          for target in amd64:amd64: mips:mips:softfloat mipsle:mipsle:softfloat arm64:arm64: armv7:arm:7; do
+            IFS=: read -r name arch variant <<< "$target"
+            export CGO_ENABLED=0 GOOS=linux GOARCH="$arch"
+            unset GOMIPS GOARM
+            if [[ "$arch" == mips || "$arch" == mipsle ]]; then export GOMIPS="$variant"; fi
+            if [[ "$arch" == arm ]]; then export GOARM="$variant"; fi
+            go build -trimpath -ldflags '-s -w' -o /tmp/commonvpn-xray-package/xray ./main
+            tar -czf "${GITHUB_WORKSPACE}/dist/common-vpn-xray-linux-${name}.tar.gz" -C /tmp/commonvpn-xray-package xray geoip.dat geosite.dat LICENSE
+          done
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: common-vpn-linux-${{ github.ref_name }}
-          path: dist/common-vpn-linux-*.tar.gz
+          path: |
+            dist/common-vpn-linux-*.tar.gz
+            dist/common-vpn-xray-linux-*.tar.gz
+            dist/common-vpn-xray-source-*.tar.gz
           if-no-files-found: error
           retention-days: 30
       - name: Publish installable router builds
@@ -35,4 +65,6 @@ jobs:
           generate_release_notes: true
           files: |
             dist/common-vpn-linux-*.tar.gz
+            dist/common-vpn-xray-linux-*.tar.gz
+            dist/common-vpn-xray-source-*.tar.gz
             install-auto

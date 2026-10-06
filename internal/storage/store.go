@@ -20,6 +20,7 @@ type State struct {
 	ActiveRoutingID      string               `json:"activeRoutingId,omitempty"`
 	TrafficMode          routing.TrafficMode  `json:"trafficMode,omitempty"`
 	DeviceIPs            []string             `json:"deviceIPs,omitempty"`
+	DeviceMACs           []string             `json:"deviceMACs,omitempty"`
 	VPNEnabled           bool                 `json:"vpnEnabled,omitempty"`
 	AutoMode             bool                 `json:"autoMode,omitempty"`
 }

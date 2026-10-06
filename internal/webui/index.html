@@ -52,10 +52,18 @@
           <option value="telegram">Только Telegram</option>
           <option value="happ">Правила Happ Routing</option>
         </select></label>
-        <label class="field"><span>Устройства сети</span><textarea id="device-ips" rows="2" placeholder="Например: 10.10.10.25, 10.10.10.26"></textarea></label>
-        <p class="muted">Оставьте поле пустым для всей сети. Укажите IP через запятую или с новой строки, чтобы применять режим только к этим устройствам. Для надёжной работы закрепите IP за устройством в настройках DHCP роутера.</p>
+        <div class="field"><span>Устройства сети по MAC</span><div id="device-picker" class="device-picker"><span class="muted">Ищу устройства в сети…</span></div></div>
+        <label class="field"><span>Добавить MAC вручную</span><textarea id="device-macs" rows="2" placeholder="Например: aa:bb:cc:dd:ee:ff"></textarea></label>
+        <details><summary>Дополнительно: адреса IP</summary><label class="field"><span>IP устройства</span><textarea id="device-ips" rows="2" placeholder="Например: 10.10.10.25"></textarea></label></details>
+        <p class="muted">Без выбора режим действует для всей сети. MAC привязывается к IP из DHCP и таблицы соседей роутера; если IP пока неизвестен, устройство не направляется через VPN.</p>
         <button class="button primary" type="submit">Сохранить и применить</button>
       </form>
+    </section>
+
+    <section class="card">
+      <div class="section-heading"><div><p class="eyebrow">МОНИТОРИНГ</p><h2>Устройства и трафик TUN</h2></div></div>
+      <p class="muted">Объём данных, переданных устройствами через интерфейс VPN с момента запуска клиента. Счётчики включают трафик TUN при любом правиле маршрутизации.</p>
+      <div id="device-traffic" class="device-traffic"><p class="empty">Загружаю счётчики…</p></div>
     </section>
 
     <section class="card routing-card">

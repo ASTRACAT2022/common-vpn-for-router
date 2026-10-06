@@ -12,12 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"common-vpn-router/internal/config"
+	"common-vpn-router/internal/devices"
 	"common-vpn-router/internal/health"
 	"common-vpn-router/internal/netroute"
 	"common-vpn-router/internal/node"
@@ -39,6 +41,8 @@ type Server struct {
 	healthPID     int
 	healthOK      bool
 	healthAt      time.Time
+	activeSources []string
+	deviceMonitor devices.Monitor
 }
 
 func NewServer(cfg config.Config, store *storage.Store, subs *subscription.Manager, controller *xray.Controller, logger *slog.Logger) *Server {
@@ -79,6 +83,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/nodes/{id}/select", s.selectNode)
 	mux.HandleFunc("GET /api/routing", s.getRouting)
 	mux.HandleFunc("PUT /api/traffic", s.updateTraffic)
+	mux.HandleFunc("GET /api/devices", s.listDevices)
+	mux.HandleFunc("GET /api/device-traffic", s.deviceTraffic)
 	mux.HandleFunc("POST /api/routing/import", s.importRouting)
 	mux.HandleFunc("DELETE /api/routing/{id}", s.deleteRouting)
 	mux.HandleFunc("POST /api/vpn/connect", s.connect)
@@ -100,7 +106,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	s.healthMu.Unlock()
 	response := map[string]any{"connected": healthy, "transportActive": status.Running, "healthCheckedAt": checkedAt, "vpnEnabled": state.VPNEnabled, "xray": status, "version": s.config.Version,
 		"selectedNode": nil, "subscription": nil, "tunnel": s.config.Tunnel, "routing": nil, "autoMode": state.AutoMode,
-		"trafficMode": routing.EffectiveTrafficMode(state.TrafficMode, hasProfile), "deviceIPs": state.DeviceIPs}
+		"trafficMode": routing.EffectiveTrafficMode(state.TrafficMode, hasProfile), "deviceIPs": state.DeviceIPs, "deviceMACs": state.DeviceMACs}
 	if hasProfile {
 		response["routing"] = map[string]any{"id": profile.ID, "name": profile.Name, "globalProxy": profile.GlobalProxy}
 	}
@@ -326,8 +332,9 @@ func (s *Server) getRouting(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) updateTraffic(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Mode      routing.TrafficMode `json:"mode"`
-		DeviceIPs []string            `json:"deviceIPs"`
+		Mode       routing.TrafficMode `json:"mode"`
+		DeviceIPs  []string            `json:"deviceIPs"`
+		DeviceMACs []string            `json:"deviceMACs"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -336,14 +343,32 @@ func (s *Server) updateTraffic(w http.ResponseWriter, r *http.Request) {
 	defer s.operationMu.Unlock()
 	previous := s.store.Snapshot()
 	_, hasProfile := findRoutingProfile(previous, previous.ActiveRoutingID)
-	devices, err := routing.ValidateTraffic(input.Mode, input.DeviceIPs, hasProfile)
+	cleanIPs, err := routing.ValidateTraffic(input.Mode, input.DeviceIPs, hasProfile)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if len(input.DeviceMACs) > 64 {
+		writeError(w, http.StatusBadRequest, "no more than 64 device MAC addresses are allowed")
+		return
+	}
+	macs := make([]string, 0, len(input.DeviceMACs))
+	seenMACs := map[string]bool{}
+	for _, value := range input.DeviceMACs {
+		mac, ok := devices.NormalizeMAC(value)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid device MAC address: "+value)
+			return
+		}
+		if !seenMACs[mac] {
+			seenMACs[mac] = true
+			macs = append(macs, mac)
+		}
+	}
 	if err := s.store.Update(func(state *storage.State) error {
 		state.TrafficMode = input.Mode
-		state.DeviceIPs = devices
+		state.DeviceIPs = cleanIPs
+		state.DeviceMACs = macs
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save traffic settings")
@@ -365,13 +390,27 @@ func (s *Server) updateTraffic(w http.ResponseWriter, r *http.Request) {
 		}
 		applied = true
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"mode": input.Mode, "deviceIPs": devices, "applied": applied})
+	writeJSON(w, http.StatusOK, map[string]any{"mode": input.Mode, "deviceIPs": cleanIPs, "deviceMACs": macs, "applied": applied})
+}
+
+func (s *Server) listDevices(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, devices.Discover())
+}
+
+func (s *Server) deviceTraffic(w http.ResponseWriter, _ *http.Request) {
+	rows, err := s.deviceMonitor.Snapshot(devices.Discover())
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "reason": err.Error(), "devices": []devices.Traffic{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"available": true, "devices": rows})
 }
 
 func (s *Server) restoreTrafficState(previous storage.State) {
 	_ = s.store.Update(func(state *storage.State) error {
 		state.TrafficMode = previous.TrafficMode
 		state.DeviceIPs = previous.DeviceIPs
+		state.DeviceMACs = previous.DeviceMACs
 		return nil
 	})
 }
@@ -562,13 +601,17 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 			return fmt.Errorf("detect physical WAN interface for VPN tunnel: %w", err)
 		}
 	}
-	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, TrafficMode: mode, DeviceIPs: state.DeviceIPs, OutboundInterface: uplink})
+	deviceIPs := append([]string(nil), state.DeviceIPs...)
+	deviceIPs = append(deviceIPs, devices.Resolve(state.DeviceMACs, devices.Discover())...)
+	sort.Strings(deviceIPs)
+	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, TrafficMode: mode, DeviceIPs: deviceIPs, RestrictDevices: len(state.DeviceMACs) > 0, OutboundInterface: uplink})
 	if err != nil {
 		return err
 	}
 	if err := s.xray.ApplyWithAssets(ctx, content, assetDir); err != nil {
 		return err
 	}
+	s.activeSources = slices.Clone(deviceIPs)
 	if err := s.store.Update(func(state *storage.State) error {
 		state.SelectedNodeID = selected.ID
 		state.VPNEnabled = true
@@ -693,6 +736,21 @@ func (s *Server) RunAutoMonitor(ctx context.Context) {
 		if !state.VPNEnabled {
 			failures = 0
 			continue
+		}
+		if len(state.DeviceMACs) > 0 && s.xray.Status().Running {
+			current := append([]string(nil), state.DeviceIPs...)
+			current = append(current, devices.Resolve(state.DeviceMACs, devices.Discover())...)
+			sort.Strings(current)
+			s.operationMu.Lock()
+			if !slices.Equal(current, s.activeSources) {
+				latest := s.store.Snapshot()
+				if selected, ok := selectedNode(latest); ok && latest.VPNEnabled {
+					if err := s.applyNode(ctx, latest, selected, latest.AutoMode); err != nil {
+						s.logger.Warn("could not update device addresses", "component", "devices", "error", err.Error())
+					}
+				}
+			}
+			s.operationMu.Unlock()
 		}
 		before := s.xray.Status()
 		if !before.Running && !state.AutoMode {
