@@ -60,6 +60,9 @@ func (p *ProcessManager) ValidateConfig(ctx context.Context, path, assetDir stri
 			}
 			return fmt.Errorf("проверка конфигурации Xray прервана: %w", checkCtx.Err())
 		}
+		if strings.Contains(detail, "vless without TLS or other encryption is prohibited") {
+			return errors.New("эта версия Xray запрещает VLESS без TLS на публичном сервере; обновите Common VPN однострочным установщиком, чтобы поставить совместимое ядро v26.6.27. Добавление TLS или REALITY только в клиенте не поможет без настройки сервера")
+		}
 		if detail != "" {
 			return fmt.Errorf("Xray отклонил созданную конфигурацию: %s", detail)
 		}

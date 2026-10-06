@@ -40,13 +40,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ -f /etc/openwrt_release ]; then
-  PLATFORM=openwrt; APP=/usr/bin/common-vpn; XRAY=/usr/bin/xray
+  PLATFORM=openwrt; APP=/usr/bin/common-vpn; XRAY=/usr/bin/common-vpn-xray
   CONFIG=/etc/common-vpn; DATA=/etc/common-vpn/data; SERVICE=/etc/init.d/common-vpn
 elif [ -d /opt/etc ] && [ -d /opt/bin ]; then
-  PLATFORM=entware; APP=/opt/bin/common-vpn; XRAY=/opt/bin/xray
+  PLATFORM=entware; APP=/opt/bin/common-vpn; XRAY=/opt/bin/common-vpn-xray
   CONFIG=/opt/etc/common-vpn; DATA=/opt/var/lib/common-vpn; SERVICE=/opt/etc/init.d/S95common-vpn
 else
-  PLATFORM=linux; APP=/usr/local/bin/common-vpn; XRAY=/usr/local/bin/xray
+  PLATFORM=linux; APP=/usr/local/bin/common-vpn; XRAY=/usr/local/bin/common-vpn-xray
   CONFIG=/etc/common-vpn; DATA=/var/lib/common-vpn; SERVICE=/etc/systemd/system/common-vpn.service
 fi
 
@@ -130,15 +130,19 @@ tar -tzf "$APP_ARCHIVE" | grep -qx common-vpn || fail "неожиданное с
 tar -xzf "$APP_ARCHIVE" -C "$TMP" common-vpn
 rm -f "$APP_ARCHIVE"
 [ -s "$TMP/common-vpn" ] || fail "в архиве нет common-vpn."
+APP_BYTES="$(wc -c < "$TMP/common-vpn")"
+APP_REQUIRED=$((APP_BYTES + 2097152))
+mkdir -p "$(dirname "$APP")" || fail "не удалось создать каталог для Common VPN."
+has_space "$APP" "$APP_REQUIRED" || fail "недостаточно места для безопасного обновления Common VPN в $APP: нужно ещё около $APP_REQUIRED байт."
 
 ALT_XRAY=""
 XRAY_RAM_MODE=0
 XRAY_ARCH_RUNTIME=""
 XRAY_FILE_RUNTIME=""
 case "$PLATFORM" in
-  openwrt) ALT_XRAY=/opt/bin/xray ;;
-  entware) ALT_XRAY=/usr/bin/xray ;;
-  linux) [ ! -d /opt ] || ALT_XRAY=/opt/bin/xray ;;
+  openwrt) ALT_XRAY=/opt/bin/common-vpn-xray ;;
+  entware) ALT_XRAY=/usr/bin/common-vpn-xray ;;
+  linux) [ ! -d /opt ] || ALT_XRAY=/opt/bin/common-vpn-xray ;;
 esac
 INSTALLED_XRAY_VERSION="$(xray_version "$XRAY" || true)"
 if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ] && [ -n "$ALT_XRAY" ] && [ -x "$ALT_XRAY" ]; then
@@ -182,26 +186,27 @@ if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
     # binary before an in-place replacement may have to free flash storage.
     if ! unzip -p "$XRAY_ZIP" "$XRAY_FILE" >/dev/null; then rm -f "$XRAY_ZIP"; continue; fi
 
-    # Leave a little room for filesystem metadata. Flash installs extract
-    # straight to their target; the RAM fallback checks free space after the
-    # ZIP download, so tmpfs can hold both archive and extracted core.
-    XRAY_REQUIRED=$((XRAY_SIZE + 65536))
+    # Reserve room for the application's atomic replacement too. Otherwise a
+    # successful core install can leave too little flash to install the UI.
+    # The RAM fallback checks free space after the ZIP download.
+    XRAY_REQUIRED=$((XRAY_SIZE + APP_REQUIRED))
     XRAY_LAST_PATH="$XRAY"
     XRAY_LAST_FREE="$(available_bytes "$(dirname "$XRAY")")"
-    XRAY_LAST_SIZE="$XRAY_SIZE"
+    XRAY_LAST_SIZE="$XRAY_REQUIRED"
     if ! has_space "$XRAY" "$XRAY_REQUIRED"; then
       if [ -n "$ALT_XRAY" ] && [ "$ALT_XRAY" != "$XRAY" ] && { [ -d "$(dirname "$ALT_XRAY")" ] || mkdir -p "$(dirname "$ALT_XRAY")" 2>/dev/null; } && has_space "$ALT_XRAY" "$XRAY_REQUIRED"; then
         say "Во внутренней памяти мало места; Xray будет установлен в $ALT_XRAY."
         XRAY="$ALT_XRAY"
         XRAY_LAST_PATH="$XRAY"
         XRAY_LAST_FREE="$(available_bytes "$(dirname "$XRAY")")"
-      elif [ "$PLATFORM" = openwrt ] && mkdir -p /tmp/common-vpn-runtime && has_space /tmp/common-vpn-runtime/xray "$XRAY_REQUIRED"; then
+      elif [ "$PLATFORM" = openwrt ] && mkdir -p /tmp/common-vpn-runtime && has_space /tmp/common-vpn-runtime/xray "$((XRAY_SIZE + 65536))"; then
         XRAY=/tmp/common-vpn-runtime/xray
         XRAY_RAM_MODE=1
         XRAY_ARCH_RUNTIME="$XRAY_ARCH"
         XRAY_FILE_RUNTIME="$XRAY_FILE"
         XRAY_LAST_PATH=/tmp/common-vpn-runtime
         XRAY_LAST_FREE="$(available_bytes /tmp/common-vpn-runtime)"
+        XRAY_LAST_SIZE="$((XRAY_SIZE + 65536))"
         say "Во flash недостаточно места; Xray будет работать из RAM. После перезагрузки он скачается заново."
       elif [ -f "$XRAY" ]; then
         rm -f "$XRAY_ZIP"
@@ -230,7 +235,7 @@ if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION_NUMBER" ]; then
     XRAY_READY=1
     break
   done
-  [ "$XRAY_READY" -eq 1 ] || fail "не удалось установить Xray: в $XRAY_LAST_PATH доступно ${XRAY_LAST_FREE:-неизвестно} байт, нужно около $XRAY_LAST_SIZE байт плюс место для файла. Существующий Xray не изменён; освободи место или подключи накопитель в /opt. Временные файлы установщика удалены."
+  [ "$XRAY_READY" -eq 1 ] || fail "не удалось установить Xray: в $XRAY_LAST_PATH доступно ${XRAY_LAST_FREE:-неизвестно} байт, для безопасной установки нужно около $XRAY_LAST_SIZE байт. Существующий Xray не изменён; освободи место или подключи накопитель в /opt. Временные файлы установщика удалены."
 else
   say "Xray Core $XRAY_VERSION уже установлен."
 fi
