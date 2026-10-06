@@ -141,6 +141,8 @@ type Options struct {
 	RoutingProfile    *routing.Profile
 	TrafficMode       routing.TrafficMode
 	DeviceIPs         []string
+	DevicePolicies    []routing.SourcePolicy
+	GeoProfile        *routing.Profile
 	RestrictDevices   bool
 	DisableIPv6       bool
 	SocksPort         uint16
@@ -218,37 +220,32 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid traffic selection: %w", err)
 	}
+	geoProfile := options.GeoProfile
+	if geoProfile == nil {
+		defaultProfile := routing.DefaultGeoProfile()
+		geoProfile = &defaultProfile
+	}
+	for i, policy := range options.DevicePolicies {
+		source, err := routing.ValidateTraffic(policy.Mode, policy.Source, options.RoutingProfile != nil)
+		if err != nil {
+			return nil, fmt.Errorf("invalid device policy %d: %w", i+1, err)
+		}
+		if len(source) == 0 {
+			continue // An offline MAC must never produce an unscoped rule.
+		}
+		if err := appendTrafficRules(&config, policy.Mode, source, geoProfile, options.RoutingProfile, fmt.Sprintf("device-%d", i+1)); err != nil {
+			return nil, err
+		}
+	}
 	if options.RestrictDevices && len(deviceIPs) == 0 {
 		config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "unresolved-devices"})
-	} else if mode == routing.TrafficHapp {
-		rules, err := options.RoutingProfile.Rules()
-		if err != nil {
-			return nil, fmt.Errorf("invalid routing profile: %w", err)
+	} else {
+		if err := appendTrafficRules(&config, mode, deviceIPs, geoProfile, options.RoutingProfile, "network"); err != nil {
+			return nil, err
 		}
-		config.Routing.DomainStrategy = string(options.RoutingProfile.DomainStrategy)
-		if config.Routing.DomainStrategy == "" {
-			config.Routing.DomainStrategy = "AsIs"
-		}
-		for _, rule := range rules {
-			rule.Source = deviceIPs
-			config.Routing.Rules = append(config.Routing.Rules, rule)
-		}
-		if options.RestrictDevices || len(deviceIPs) > 0 {
+		if len(deviceIPs) > 0 {
 			config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "other-devices"})
 		}
-	} else if mode == routing.TrafficTelegram {
-		config.Routing.Rules = append(config.Routing.Rules,
-			routing.Rule{Domain: routing.TelegramDomains, Source: deviceIPs, OutboundTag: "proxy", RuleTag: "telegram-domains"},
-			routing.Rule{IP: routing.TelegramIPs, Source: deviceIPs, OutboundTag: "proxy", RuleTag: "telegram-datacenters"},
-		)
-		config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "telegram-fallback"})
-	} else if len(deviceIPs) > 0 {
-		config.Routing.Rules = append(config.Routing.Rules,
-			routing.Rule{Source: deviceIPs, Network: "tcp,udp", OutboundTag: "proxy", RuleTag: "selected-devices"},
-			routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "other-devices"},
-		)
-	} else {
-		config.Routing.Rules = append(config.Routing.Rules, routing.Rule{Network: "tcp,udp", OutboundTag: "proxy", RuleTag: "default-proxy"})
 	}
 	encoded, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -258,6 +255,48 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 		return nil, errors.New("generated Xray config is invalid JSON")
 	}
 	return encoded, nil
+}
+
+func appendTrafficRules(config *Config, mode routing.TrafficMode, source []string, geoProfile, happProfile *routing.Profile, prefix string) error {
+	add := func(rule routing.Rule) {
+		rule.Source = source
+		rule.RuleTag = prefix + "-" + rule.RuleTag
+		config.Routing.Rules = append(config.Routing.Rules, rule)
+	}
+	switch mode {
+	case routing.TrafficAll:
+		add(routing.Rule{Network: "tcp,udp", OutboundTag: "proxy", RuleTag: "all"})
+	case routing.TrafficDirect:
+		add(routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "direct"})
+	case routing.TrafficTelegram:
+		add(routing.Rule{Domain: routing.TelegramDomains, OutboundTag: "proxy", RuleTag: "telegram-domains"})
+		add(routing.Rule{IP: routing.TelegramIPs, OutboundTag: "proxy", RuleTag: "telegram-ips"})
+		add(routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "telegram-fallback"})
+	case routing.TrafficYouTube:
+		add(routing.Rule{Domain: routing.YouTubeDomains, OutboundTag: "proxy", RuleTag: "youtube-domains"})
+		add(routing.Rule{Network: "tcp,udp", OutboundTag: "direct", RuleTag: "youtube-fallback"})
+	case routing.TrafficGeoBlock, routing.TrafficHapp:
+		profile := geoProfile
+		if mode == routing.TrafficHapp {
+			profile = happProfile
+		}
+		if profile == nil {
+			return errors.New("import a Happ routing profile before selecting Happ mode")
+		}
+		rules, err := profile.Rules()
+		if err != nil {
+			return fmt.Errorf("invalid routing profile: %w", err)
+		}
+		if profile.DomainStrategy != "" {
+			config.Routing.DomainStrategy = string(profile.DomainStrategy)
+		}
+		for _, rule := range rules {
+			add(rule)
+		}
+	default:
+		return fmt.Errorf("unknown traffic mode %q", mode)
+	}
+	return nil
 }
 
 func outboundInterface(name string) string {

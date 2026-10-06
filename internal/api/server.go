@@ -106,7 +106,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	s.healthMu.Unlock()
 	response := map[string]any{"connected": healthy, "transportActive": status.Running, "healthCheckedAt": checkedAt, "vpnEnabled": state.VPNEnabled, "xray": status, "version": s.config.Version,
 		"selectedNode": nil, "subscription": nil, "tunnel": s.config.Tunnel, "routing": nil, "autoMode": state.AutoMode,
-		"trafficMode": routing.EffectiveTrafficMode(state.TrafficMode, hasProfile), "deviceIPs": state.DeviceIPs, "deviceMACs": state.DeviceMACs}
+		"trafficMode": routing.EffectiveTrafficMode(state.TrafficMode, hasProfile), "deviceIPs": state.DeviceIPs, "deviceMACs": state.DeviceMACs, "devicePolicies": state.DevicePolicies}
 	if hasProfile {
 		response["routing"] = map[string]any{"id": profile.ID, "name": profile.Name, "globalProxy": profile.GlobalProxy}
 	}
@@ -332,9 +332,10 @@ func (s *Server) getRouting(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) updateTraffic(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Mode       routing.TrafficMode `json:"mode"`
-		DeviceIPs  []string            `json:"deviceIPs"`
-		DeviceMACs []string            `json:"deviceMACs"`
+		Mode           routing.TrafficMode    `json:"mode"`
+		DeviceIPs      []string               `json:"deviceIPs"`
+		DeviceMACs     []string               `json:"deviceMACs"`
+		DevicePolicies []routing.DevicePolicy `json:"devicePolicies"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -365,10 +366,51 @@ func (s *Server) updateTraffic(w http.ResponseWriter, r *http.Request) {
 			macs = append(macs, mac)
 		}
 	}
+	if len(input.DevicePolicies) > 64 {
+		writeError(w, http.StatusBadRequest, "no more than 64 device policies are allowed")
+		return
+	}
+	policies := make([]routing.DevicePolicy, 0, len(input.DevicePolicies))
+	seenPolicies := map[string]bool{}
+	for _, policy := range input.DevicePolicies {
+		if _, err := routing.ValidateTraffic(policy.Mode, nil, hasProfile); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if (policy.MAC == "") == (policy.IP == "") {
+			writeError(w, http.StatusBadRequest, "each device policy needs exactly one MAC or IP")
+			return
+		}
+		key := ""
+		if policy.MAC != "" {
+			mac, ok := devices.NormalizeMAC(policy.MAC)
+			if !ok {
+				writeError(w, http.StatusBadRequest, "invalid device MAC address: "+policy.MAC)
+				return
+			}
+			policy.MAC = mac
+			key = "mac:" + mac
+		} else {
+			ips, err := routing.ValidateTraffic(routing.TrafficAll, []string{policy.IP}, false)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			policy.IP = ips[0]
+			key = "ip:" + policy.IP
+		}
+		if seenPolicies[key] {
+			writeError(w, http.StatusBadRequest, "device appears more than once: "+key)
+			return
+		}
+		seenPolicies[key] = true
+		policies = append(policies, policy)
+	}
 	if err := s.store.Update(func(state *storage.State) error {
 		state.TrafficMode = input.Mode
 		state.DeviceIPs = cleanIPs
 		state.DeviceMACs = macs
+		state.DevicePolicies = policies
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save traffic settings")
@@ -390,7 +432,7 @@ func (s *Server) updateTraffic(w http.ResponseWriter, r *http.Request) {
 		}
 		applied = true
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"mode": input.Mode, "deviceIPs": cleanIPs, "deviceMACs": macs, "applied": applied})
+	writeJSON(w, http.StatusOK, map[string]any{"mode": input.Mode, "deviceIPs": cleanIPs, "deviceMACs": macs, "devicePolicies": policies, "applied": applied})
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, _ *http.Request) {
@@ -411,6 +453,7 @@ func (s *Server) restoreTrafficState(previous storage.State) {
 		state.TrafficMode = previous.TrafficMode
 		state.DeviceIPs = previous.DeviceIPs
 		state.DeviceMACs = previous.DeviceMACs
+		state.DevicePolicies = previous.DevicePolicies
 		return nil
 	})
 }
@@ -433,7 +476,9 @@ func (s *Server) importRouting(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Update(func(state *storage.State) error {
 		state.RoutingProfiles = []routing.Profile{profile}
 		state.ActiveRoutingID = profile.ID
-		state.TrafficMode = routing.TrafficHapp
+		if len(state.DevicePolicies) == 0 {
+			state.TrafficMode = routing.TrafficHapp
+		}
 		return nil
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save routing profile")
@@ -477,7 +522,14 @@ func (s *Server) deleteRouting(w http.ResponseWriter, r *http.Request) {
 			state.RoutingProfiles = profiles
 			if state.ActiveRoutingID == id {
 				state.ActiveRoutingID = ""
-				state.TrafficMode = routing.TrafficAll
+				if state.TrafficMode == routing.TrafficHapp {
+					state.TrafficMode = routing.TrafficAll
+				}
+				for i := range state.DevicePolicies {
+					if state.DevicePolicies[i].Mode == routing.TrafficHapp {
+						state.DevicePolicies[i].Mode = routing.TrafficGeoBlock
+					}
+				}
 			}
 		}
 		return nil
@@ -512,6 +564,7 @@ func (s *Server) restoreRoutingState(previous storage.State) {
 		state.RoutingProfiles = previous.RoutingProfiles
 		state.ActiveRoutingID = previous.ActiveRoutingID
 		state.TrafficMode = previous.TrafficMode
+		state.DevicePolicies = previous.DevicePolicies
 		return nil
 	})
 }
@@ -575,20 +628,29 @@ func (s *Server) disableAuto(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) applyNode(ctx context.Context, state storage.State, selected node.Node, auto bool) error {
-	var profile *routing.Profile
 	value, hasProfile := findRoutingProfile(state, state.ActiveRoutingID)
 	mode := routing.EffectiveTrafficMode(state.TrafficMode, hasProfile)
-	if hasProfile && mode == routing.TrafficHapp {
-		profile = &value
+	var customProfile *routing.Profile
+	geoDefault := routing.DefaultGeoProfile()
+	geoProfile := &geoDefault
+	if hasProfile {
+		customProfile = &value
+		geoProfile = customProfile
+	}
+	usesImported := mode == routing.TrafficHapp || mode == routing.TrafficGeoBlock
+	for _, policy := range state.DevicePolicies {
+		if policy.Mode == routing.TrafficHapp || policy.Mode == routing.TrafficGeoBlock {
+			usesImported = true
+		}
 	}
 	assetDir := ""
-	if profile != nil && (profile.GeoIPURL != "" || profile.GeoSiteURL != "") {
+	if hasProfile && usesImported && (value.GeoIPURL != "" || value.GeoSiteURL != "") {
 		standard := os.Getenv("XRAY_LOCATION_ASSET")
 		if standard == "" {
 			standard = filepath.Dir(s.config.XrayBinary)
 		}
 		var err error
-		assetDir, err = routing.EnsureAssets(ctx, *profile, filepath.Join(s.config.ConfigDir, "routing-assets"), standard)
+		assetDir, err = routing.EnsureAssets(ctx, value, filepath.Join(s.config.ConfigDir, "routing-assets"), standard)
 		if err != nil {
 			return fmt.Errorf("prepare routing geo files: %w", err)
 		}
@@ -601,17 +663,15 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 			return fmt.Errorf("detect physical WAN interface for VPN tunnel: %w", err)
 		}
 	}
-	deviceIPs := append([]string(nil), state.DeviceIPs...)
-	deviceIPs = append(deviceIPs, devices.Resolve(state.DeviceMACs, devices.Discover())...)
-	sort.Strings(deviceIPs)
-	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, TrafficMode: mode, DeviceIPs: deviceIPs, RestrictDevices: len(state.DeviceMACs) > 0, DisableIPv6: netroute.IPv6Disabled(), OutboundInterface: uplink})
+	deviceIPs, policies, activeSources := resolveTrafficSources(state, devices.Discover())
+	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: customProfile, GeoProfile: geoProfile, TrafficMode: mode, DeviceIPs: deviceIPs, DevicePolicies: policies, RestrictDevices: len(state.DeviceMACs) > 0, DisableIPv6: netroute.IPv6Disabled(), OutboundInterface: uplink})
 	if err != nil {
 		return err
 	}
 	if err := s.xray.ApplyWithAssets(ctx, content, assetDir); err != nil {
 		return err
 	}
-	s.activeSources = slices.Clone(deviceIPs)
+	s.activeSources = activeSources
 	if err := s.store.Update(func(state *storage.State) error {
 		state.SelectedNodeID = selected.ID
 		state.VPNEnabled = true
@@ -630,6 +690,31 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 		return errors.New("could not save VPN state")
 	}
 	return nil
+}
+
+func resolveTrafficSources(state storage.State, discovered []devices.Device) ([]string, []routing.SourcePolicy, []string) {
+	legacy := append([]string(nil), state.DeviceIPs...)
+	legacy = append(legacy, devices.Resolve(state.DeviceMACs, discovered)...)
+	sort.Strings(legacy)
+	keys := make([]string, 0, len(legacy)+len(state.DevicePolicies))
+	for _, ip := range legacy {
+		keys = append(keys, "legacy:"+ip)
+	}
+	policies := make([]routing.SourcePolicy, 0, len(state.DevicePolicies))
+	for index, policy := range state.DevicePolicies {
+		source := []string{}
+		if policy.MAC != "" {
+			source = devices.Resolve([]string{policy.MAC}, discovered)
+		} else if policy.IP != "" {
+			source = []string{policy.IP}
+		}
+		policies = append(policies, routing.SourcePolicy{Mode: policy.Mode, Source: source})
+		for _, ip := range source {
+			keys = append(keys, fmt.Sprintf("policy:%d:%s:%s", index, policy.Mode, ip))
+		}
+	}
+	sort.Strings(keys)
+	return legacy, policies, keys
 }
 
 type reachableNode struct {
@@ -737,10 +822,8 @@ func (s *Server) RunAutoMonitor(ctx context.Context) {
 			failures = 0
 			continue
 		}
-		if len(state.DeviceMACs) > 0 && s.xray.Status().Running {
-			current := append([]string(nil), state.DeviceIPs...)
-			current = append(current, devices.Resolve(state.DeviceMACs, devices.Discover())...)
-			sort.Strings(current)
+		if hasMACSelection(state) && s.xray.Status().Running {
+			_, _, current := resolveTrafficSources(state, devices.Discover())
 			s.operationMu.Lock()
 			if !slices.Equal(current, s.activeSources) {
 				latest := s.store.Snapshot()
@@ -804,6 +887,18 @@ func (s *Server) RunAutoMonitor(ctx context.Context) {
 		}
 		s.operationMu.Unlock()
 	}
+}
+
+func hasMACSelection(state storage.State) bool {
+	if len(state.DeviceMACs) > 0 {
+		return true
+	}
+	for _, policy := range state.DevicePolicies {
+		if policy.MAC != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // RunSubscriptionMonitor refreshes subscriptions at their profile-update-interval

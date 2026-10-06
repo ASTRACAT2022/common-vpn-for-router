@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const ui = { connected: false, autoMode: false, selectedNode: null, nodes: [], routing: null, trafficMode: "all", deviceIPs: [], deviceMACs: [], devices: [] };
+const ui = { connected: false, autoMode: false, selectedNode: null, nodes: [], routing: null, trafficMode: "all", displayMode: "all", deviceIPs: [], deviceMACs: [], devicePolicies: [], devices: [] };
 let trafficDirty = false;
 
 if (new URLSearchParams(location.search).has("demo")) {
@@ -34,9 +34,9 @@ function updateConnection() {
   pill.classList.toggle("disconnected", !ui.connected);
   $("#connection-label").textContent = ui.connected ? (ui.autoMode ? "АВТО · ONLINE" : "ONLINE") : (ui.autoMode ? "АВТО · ПОИСК" : "OFFLINE");
   $("#hero-title").textContent = ui.connected ? "VPN подключён" : (ui.autoMode ? "Авто восстанавливает VPN" : (ui.transportActive ? "Проверяем соединение" : "Ваш VPN готов"));
-  const modeLabel = ui.trafficMode === "telegram" ? "только для Telegram" : ui.trafficMode === "happ" ? "по правилам Happ" : "для всего трафика";
-  const count = (ui.deviceMACs?.length || 0) + (ui.deviceIPs?.length || 0);
-  const deviceLabel = count ? ` · устройств: ${count}` : "";
+  const modeLabel = ({ all: "для всего трафика", direct: "напрямую по умолчанию", geoblock: "по правилам геоблока", telegram: "только для Telegram", youtube: "только для YouTube", happ: "по правилам Happ" })[ui.displayMode] || "по выбранным правилам";
+  const count = ui.devicePolicies.length;
+  const deviceLabel = count ? ` · отдельных правил: ${count}` : "";
   $("#hero-description").textContent = ui.autoMode
     ? `${ui.selectedNode?.name || "Поиск рабочего сервера"} · авто проверяет VPN и переключит сервер при сбое.`
     : ui.connected
@@ -59,6 +59,11 @@ async function loadStatus() {
   ui.trafficMode = status.trafficMode || (status.routing ? "happ" : "all");
   ui.deviceIPs = status.deviceIPs || [];
   ui.deviceMACs = status.deviceMACs || [];
+  const legacy = !status.devicePolicies?.length && (ui.deviceIPs.length || ui.deviceMACs.length);
+  ui.devicePolicies = legacy
+    ? [...ui.deviceMACs.map(mac => ({ mac, mode: ui.trafficMode })), ...ui.deviceIPs.map(ip => ({ ip, mode: ui.trafficMode }))]
+    : (status.devicePolicies || []);
+  ui.displayMode = legacy ? "direct" : ui.trafficMode;
   const routingData = await api("/api/routing");
   ui.routing = routingData.profile;
   renderRouting();
@@ -69,29 +74,57 @@ async function loadStatus() {
 function renderTraffic() {
   $("#traffic-mode").querySelector('[value="happ"]').disabled = !ui.routing;
   if (trafficDirty) return;
-  $("#traffic-mode").value = ui.trafficMode;
-  $("#device-ips").value = ui.deviceIPs.join(", ");
-  $("#device-macs").value = ui.deviceMACs.filter(mac => !ui.devices.some(device => device.mac === mac)).join(", ");
+  $("#traffic-mode").value = ui.displayMode;
   renderDevices();
+}
+
+const policyModes = [
+  ["", "Как для всей сети"], ["all", "Всё через VPN"], ["direct", "Напрямую"],
+  ["geoblock", "Геоблок"], ["telegram", "Telegram"], ["youtube", "YouTube"], ["happ", "Свой Happ"],
+];
+
+function createDeviceRow(policy, caption, removable = false) {
+  const row = document.createElement("div"); row.className = "device-option";
+  if (policy.mac) row.dataset.mac = policy.mac;
+  if (policy.ip) row.dataset.ip = policy.ip;
+  const title = document.createElement("span"); title.className = "device-caption"; title.textContent = caption;
+  const select = document.createElement("select"); select.className = "device-policy-mode";
+  select.setAttribute("aria-label", `Режим для ${caption}`);
+  for (const [value, label] of policyModes) {
+    const option = document.createElement("option"); option.value = value; option.textContent = label;
+    option.disabled = value === "happ" && !ui.routing && policy.mode !== "happ";
+    select.append(option);
+  }
+  select.value = policy.mode || "";
+  select.addEventListener("change", () => { trafficDirty = true; });
+  row.append(title, select);
+  if (removable) {
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "remove-profile";
+    remove.textContent = "Убрать"; remove.setAttribute("aria-label", `Убрать ${caption}`);
+    remove.addEventListener("click", () => { row.remove(); trafficDirty = true; });
+    row.append(remove);
+  }
+  return row;
 }
 
 function renderDevices() {
   if (trafficDirty) return;
   const container = $("#device-picker");
   container.replaceChildren();
-  if (!ui.devices.length) {
-    const empty = document.createElement("span"); empty.className = "muted";
-    empty.textContent = "Устройства пока не обнаружены. MAC можно указать вручную.";
-    container.append(empty); return;
-  }
+  const discovered = new Set();
   for (const device of ui.devices) {
-    const label = document.createElement("label"); label.className = "device-option";
-    const box = document.createElement("input"); box.type = "checkbox"; box.value = device.mac;
-    box.checked = ui.deviceMACs.includes(device.mac);
-    box.addEventListener("change", () => { trafficDirty = true; });
-    const caption = document.createElement("span");
-    caption.textContent = `${device.name || device.mac} · ${device.ips.join(", ")} · ${device.mac}`;
-    label.append(box, caption); container.append(label);
+    discovered.add(device.mac);
+    const policy = ui.devicePolicies.find(item => item.mac === device.mac);
+    container.append(createDeviceRow({ mac: device.mac, mode: policy?.mode || "" }, `${device.name || device.mac} · ${device.ips.join(", ")} · ${device.mac}`));
+  }
+  for (const policy of ui.devicePolicies) {
+    if (policy.mac && discovered.has(policy.mac)) continue;
+    container.append(createDeviceRow(policy, `${policy.mac || policy.ip} · вручную`, true));
+  }
+  if (!container.children.length) {
+    const empty = document.createElement("span"); empty.className = "muted";
+    empty.textContent = "Устройства пока не обнаружены. Добавьте MAC или IP вручную.";
+    container.append(empty);
   }
 }
 
@@ -199,7 +232,7 @@ function renderRouting() {
   const rulesExpanded = row.querySelector(".profile-rules-details")?.open || false;
   row.replaceChildren();
   if (!ui.routing) {
-    const label = document.createElement("span"); label.className = "muted"; label.textContent = "Профиль не добавлен"; row.append(label); return;
+    const label = document.createElement("span"); label.className = "muted"; label.textContent = "Профиль Happ не добавлен. Доступен встроенный геоблок."; row.append(label); return;
   }
   const details = document.createElement("div");
   const title = document.createElement("div"); title.className = "profile-name"; title.textContent = ui.routing.name;
@@ -212,7 +245,8 @@ function renderRouting() {
   const fallback = ui.routing.globalProxy ? "остальной трафик → VPN" : "остальной трафик → напрямую";
   const order = (ui.routing.routeOrder || ["block", "proxy", "direct"]).join(" → ");
   const meta = document.createElement("div"); meta.className = "profile-meta";
-  meta.textContent = `${ui.trafficMode === "happ" ? "Активен" : "Сохранён, не активен"} · ${ruleCount} правил · ${fallback} · порядок ${order}`;
+  const active = ["happ", "geoblock"].includes(ui.displayMode) || ui.devicePolicies.some(policy => ["happ", "geoblock"].includes(policy.mode));
+  meta.textContent = `${active ? "Используется в правилах" : "Сохранён, не активен"} · ${ruleCount} правил · ${fallback} · порядок ${order}`;
   details.append(title, meta);
   const ruleDetails = document.createElement("details"); ruleDetails.className = "profile-rules-details";
   ruleDetails.open = rulesExpanded;
@@ -276,18 +310,32 @@ $("#routing-form").addEventListener("submit", async (event) => {
 });
 
 $("#traffic-mode").addEventListener("change", () => { trafficDirty = true; });
-$("#device-ips").addEventListener("input", () => { trafficDirty = true; });
-$("#device-macs").addEventListener("input", () => { trafficDirty = true; });
+function addManualDevice(kind) {
+  const input = kind === "mac" ? $("#manual-device-mac") : $("#manual-device-ip");
+  const value = input.value.trim().toLowerCase();
+  if (!value) { notice("Укажите MAC или IP устройства.", true); return; }
+  const key = kind === "mac" ? "mac" : "ip";
+  const duplicate = [...document.querySelectorAll("#device-picker .device-option")].some(row => row.dataset[key] === value);
+  if (duplicate) { notice("Это устройство уже есть в списке. Выберите для него режим.", true); return; }
+  $("#device-picker .muted")?.remove();
+  $("#device-picker").append(createDeviceRow({ [key]: value, mode: "geoblock" }, `${value} · вручную`, true));
+  input.value = "";
+  trafficDirty = true;
+}
+$("#add-device-mac").addEventListener("click", () => addManualDevice("mac"));
+$("#add-device-ip").addEventListener("click", () => addManualDevice("ip"));
 $("#traffic-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.submitter;
   button.disabled = true;
-  const deviceIPs = $("#device-ips").value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean);
-  const deviceMACs = [...document.querySelectorAll("#device-picker input:checked")].map(box => box.value).concat($("#device-macs").value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean));
+  const devicePolicies = [...document.querySelectorAll("#device-picker .device-option")].flatMap(row => {
+    const mode = row.querySelector(".device-policy-mode").value;
+    return mode ? [{ ...(row.dataset.mac ? { mac: row.dataset.mac } : { ip: row.dataset.ip }), mode }] : [];
+  });
   try {
-    const result = await api("/api/traffic", { method: "PUT", body: JSON.stringify({ mode: $("#traffic-mode").value, deviceIPs, deviceMACs }) });
+    const result = await api("/api/traffic", { method: "PUT", body: JSON.stringify({ mode: $("#traffic-mode").value, deviceIPs: [], deviceMACs: [], devicePolicies }) });
     trafficDirty = false;
-    await loadStatus();
+    await refresh();
     notice(result.applied ? "Режим трафика применён к VPN." : "Режим сохранён и применится при подключении VPN.");
   } catch (error) { notice(error.message, true); }
   finally { button.disabled = false; }

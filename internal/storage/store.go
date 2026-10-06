@@ -13,16 +13,17 @@ import (
 )
 
 type State struct {
-	Subscriptions        []model.Subscription `json:"subscriptions"`
-	ActiveSubscriptionID string               `json:"activeSubscriptionId,omitempty"`
-	SelectedNodeID       string               `json:"selectedNodeId,omitempty"`
-	RoutingProfiles      []routing.Profile    `json:"routingProfiles,omitempty"`
-	ActiveRoutingID      string               `json:"activeRoutingId,omitempty"`
-	TrafficMode          routing.TrafficMode  `json:"trafficMode,omitempty"`
-	DeviceIPs            []string             `json:"deviceIPs,omitempty"`
-	DeviceMACs           []string             `json:"deviceMACs,omitempty"`
-	VPNEnabled           bool                 `json:"vpnEnabled,omitempty"`
-	AutoMode             bool                 `json:"autoMode,omitempty"`
+	Subscriptions        []model.Subscription   `json:"subscriptions"`
+	ActiveSubscriptionID string                 `json:"activeSubscriptionId,omitempty"`
+	SelectedNodeID       string                 `json:"selectedNodeId,omitempty"`
+	RoutingProfiles      []routing.Profile      `json:"routingProfiles,omitempty"`
+	ActiveRoutingID      string                 `json:"activeRoutingId,omitempty"`
+	TrafficMode          routing.TrafficMode    `json:"trafficMode,omitempty"`
+	DeviceIPs            []string               `json:"deviceIPs,omitempty"`
+	DeviceMACs           []string               `json:"deviceMACs,omitempty"`
+	DevicePolicies       []routing.DevicePolicy `json:"devicePolicies,omitempty"`
+	VPNEnabled           bool                   `json:"vpnEnabled,omitempty"`
+	AutoMode             bool                   `json:"autoMode,omitempty"`
 }
 
 type Store struct {

@@ -10,9 +10,25 @@ type TrafficMode string
 
 const (
 	TrafficAll      TrafficMode = "all"
+	TrafficDirect   TrafficMode = "direct"
+	TrafficGeoBlock TrafficMode = "geoblock"
 	TrafficTelegram TrafficMode = "telegram"
+	TrafficYouTube  TrafficMode = "youtube"
 	TrafficHapp     TrafficMode = "happ"
 )
+
+// DevicePolicy overrides the network default for one LAN device. MACs are
+// resolved from DHCP/ARP when a config is applied; IPs are for manual entries.
+type DevicePolicy struct {
+	MAC  string      `json:"mac,omitempty"`
+	IP   string      `json:"ip,omitempty"`
+	Mode TrafficMode `json:"mode"`
+}
+
+type SourcePolicy struct {
+	Source []string
+	Mode   TrafficMode
+}
 
 // EffectiveTrafficMode preserves the behavior of states created before the
 // traffic selector existed: an imported Happ profile remains active.
@@ -28,7 +44,7 @@ func EffectiveTrafficMode(mode TrafficMode, hasProfile bool) TrafficMode {
 
 func ValidateTraffic(mode TrafficMode, deviceIPs []string, hasProfile bool) ([]string, error) {
 	switch mode {
-	case TrafficAll, TrafficTelegram:
+	case TrafficAll, TrafficDirect, TrafficGeoBlock, TrafficTelegram, TrafficYouTube:
 	case TrafficHapp:
 		if !hasProfile {
 			return nil, errors.New("import a Happ routing profile before selecting Happ mode")
@@ -70,4 +86,9 @@ var TelegramDomains = []string{
 	"domain:telegram.org", "domain:t.me", "domain:telegram.me",
 	"domain:telegra.ph", "domain:telegram-cdn.org", "domain:telegram.dog",
 	"domain:telesco.pe",
+}
+
+var YouTubeDomains = []string{
+	"domain:youtube.com", "domain:youtu.be", "domain:youtube-nocookie.com",
+	"domain:googlevideo.com", "domain:ytimg.com", "full:youtubei.googleapis.com",
 }

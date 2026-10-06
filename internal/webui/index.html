@@ -47,15 +47,23 @@
     <section class="card traffic-card">
       <div class="section-heading"><div><p class="eyebrow">ТРАФИК</p><h2>Что направлять через VPN</h2></div></div>
       <form id="traffic-form" class="traffic-form">
-        <label class="field"><span>Режим</span><select id="traffic-mode">
-          <option value="all">Весь трафик</option>
-          <option value="telegram">Только Telegram</option>
-          <option value="happ">Правила Happ Routing</option>
+        <label class="field"><span>По умолчанию для сети</span><select id="traffic-mode">
+          <option value="all">Всё через VPN</option>
+          <option value="direct">Напрямую, без VPN</option>
+          <option value="geoblock">Геоблок · Россия напрямую</option>
+          <option value="telegram">Только Telegram через VPN</option>
+          <option value="youtube">Только YouTube через VPN</option>
+          <option value="happ">Свой профиль Happ</option>
         </select></label>
-        <div class="field"><span>Устройства сети по MAC</span><div id="device-picker" class="device-picker"><span class="muted">Ищу устройства в сети…</span></div></div>
-        <label class="field"><span>Добавить MAC вручную</span><textarea id="device-macs" rows="2" placeholder="Например: aa:bb:cc:dd:ee:ff"></textarea></label>
-        <details><summary>Дополнительно: адреса IP</summary><label class="field"><span>IP устройства</span><textarea id="device-ips" rows="2" placeholder="Например: 10.10.10.25"></textarea></label></details>
-        <p class="muted">Без выбора режим действует для всей сети. MAC привязывается к IP из DHCP и таблицы соседей роутера; если IP пока неизвестен, устройство не направляется через VPN.</p>
+        <p class="muted">«Геоблок» направляет российские и локальные адреса напрямую, остальные — через VPN. Если импортирован Happ, используются его правила. Telegram и YouTube направляют через VPN только указанные сервисы.</p>
+        <div class="field"><span>Свой режим для каждого устройства</span><div id="device-picker" class="device-picker"><span class="muted">Ищу устройства в сети…</span></div></div>
+        <details class="manual-device"><summary>Добавить устройство вручную</summary>
+          <div class="manual-device-fields">
+            <label class="field"><span>MAC</span><input id="manual-device-mac" type="text" placeholder="aa:bb:cc:dd:ee:ff"></label><button id="add-device-mac" class="button secondary" type="button">Добавить MAC</button>
+            <label class="field"><span>Или IP</span><input id="manual-device-ip" type="text" placeholder="10.10.10.25"></label><button id="add-device-ip" class="button secondary" type="button">Добавить IP</button>
+          </div>
+        </details>
+        <p class="muted">Устройство без собственного режима наследует настройку сети. MAC сопоставляется с IP из DHCP роутера; при смене IP правила обновляются автоматически.</p>
         <button class="button primary" type="submit">Сохранить и применить</button>
       </form>
     </section>
@@ -67,13 +75,14 @@
     </section>
 
     <section class="card routing-card">
-      <div class="section-heading"><div><p class="eyebrow">ПО ЖЕЛАНИЮ</p><h2>Правила маршрутизации</h2></div></div>
-      <p class="muted">Импортируйте ссылку Happ или Common для правил геоблока. После импорта режим «Правила Happ Routing» включится автоматически; другие режимы можно выбрать выше.</p>
-      <form id="routing-form" class="routing-form">
-        <label class="field grow"><span>Ссылка профиля</span><input id="routing-link" type="text" placeholder="happ://routing/onadd/…" autocomplete="off"></label>
-        <button class="button secondary form-button" type="submit">Импортировать</button>
-      </form>
-      <div id="routing-profile" class="profile-row"><span class="muted">Профиль не добавлен</span></div>
+      <details id="happ-details"><summary>Свой профиль Happ Routing · дополнительно</summary>
+        <p class="muted">Профиль Happ заменяет стандартные правила «Геоблока». Его можно выбрать и как отдельный режим для сети или устройства.</p>
+        <form id="routing-form" class="routing-form">
+          <label class="field grow"><span>Ссылка профиля</span><input id="routing-link" type="text" placeholder="happ://routing/onadd/…" autocomplete="off"></label>
+          <button class="button secondary form-button" type="submit">Импортировать</button>
+        </form>
+        <div id="routing-profile" class="profile-row"><span class="muted">Используются стандартные правила геоблока</span></div>
+      </details>
     </section>
 
     <footer>Настройки VPN хранятся на роутере. Установщик использует отдельный Xray Core для Common VPN.</footer>

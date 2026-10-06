@@ -39,6 +39,19 @@ type Profile struct {
 	BlockIPs       []string       `json:"blockIPs,omitempty"`
 }
 
+// DefaultGeoProfile is the built-in preset used when no Happ profile was
+// imported. It routes Russian and private destinations directly and all
+// remaining destinations through the VPN.
+func DefaultGeoProfile() Profile {
+	return Profile{
+		Name:           "Геоблок · Россия напрямую",
+		GlobalProxy:    true,
+		DomainStrategy: IPIfNonMatch,
+		DirectDomains:  []string{"geosite:category-ru"},
+		DirectIPs:      []string{"geoip:private", "geoip:ru"},
+	}
+}
+
 type Rule struct {
 	Domain      []string `json:"domain,omitempty"`
 	IP          []string `json:"ip,omitempty"`
