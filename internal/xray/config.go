@@ -142,6 +142,7 @@ type Options struct {
 	TrafficMode       routing.TrafficMode
 	DeviceIPs         []string
 	RestrictDevices   bool
+	DisableIPv6       bool
 	SocksPort         uint16
 	ProbeOnly         bool
 	OutboundInterface string
@@ -185,14 +186,20 @@ func GenerateWithOptions(selected node.Node, options Options) ([]byte, error) {
 			Settings: map[string]any{"name": fmt.Sprintf("cvprobe%d", socksPort), "mtu": 1500, "autoOutboundsInterface": outboundInterface(options.OutboundInterface)},
 		})
 	} else if options.Tunnel {
+		gateways := []string{"198.18.0.1/30"}
+		routes := []string{"0.0.0.0/1", "128.0.0.0/1"}
+		if !options.DisableIPv6 {
+			gateways = append(gateways, "fd00:ca:fe::1/126")
+			routes = append(routes, "::/1", "8000::/1")
+		}
 		config.Inbounds = append(config.Inbounds, Inbound{
 			Tag: "router-tun", Protocol: "tun",
 			Settings: map[string]any{
 				"name": "commonvpn0", "mtu": 1500,
-				"gateway": []string{"198.18.0.1/30", "fd00:ca:fe::1/126"},
+				"gateway": gateways,
 				// Split defaults beat the router's WAN default route regardless of
 				// its metric, while connected LAN routes remain more specific.
-				"autoSystemRoutingTable": []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"},
+				"autoSystemRoutingTable": routes,
 				"autoOutboundsInterface": outboundInterface(options.OutboundInterface),
 			},
 			Sniffing: Sniffing{Enabled: true, DestOverride: []string{"http", "tls", "quic"}},

@@ -604,7 +604,7 @@ func (s *Server) applyNode(ctx context.Context, state storage.State, selected no
 	deviceIPs := append([]string(nil), state.DeviceIPs...)
 	deviceIPs = append(deviceIPs, devices.Resolve(state.DeviceMACs, devices.Discover())...)
 	sort.Strings(deviceIPs)
-	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, TrafficMode: mode, DeviceIPs: deviceIPs, RestrictDevices: len(state.DeviceMACs) > 0, OutboundInterface: uplink})
+	content, err := xray.GenerateWithOptions(selected, xray.Options{Tunnel: s.config.Tunnel, RoutingProfile: profile, TrafficMode: mode, DeviceIPs: deviceIPs, RestrictDevices: len(state.DeviceMACs) > 0, DisableIPv6: netroute.IPv6Disabled(), OutboundInterface: uplink})
 	if err != nil {
 		return err
 	}

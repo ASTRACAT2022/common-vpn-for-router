@@ -3,10 +3,33 @@ package netroute
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 )
+
+// IPv6Disabled reports whether Linux will reject IPv6 addresses or routes on
+// newly created interfaces. The "default" sysctl applies to the new TUN.
+func IPv6Disabled() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	for _, path := range []string{
+		"/proc/sys/net/ipv6/conf/all/disable_ipv6",
+		"/proc/sys/net/ipv6/conf/default/disable_ipv6",
+	} {
+		value, err := os.ReadFile(path)
+		if err != nil {
+			return true
+		}
+		if strings.TrimSpace(string(value)) == "1" {
+			return true
+		}
+	}
+	return false
+}
 
 // DefaultOutboundInterface returns the best physical IPv4 default-route
 // interface. Xray must bind its upstream sockets to this device before its TUN
